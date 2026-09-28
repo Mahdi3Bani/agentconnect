@@ -17,6 +17,7 @@ declare module 'irc-framework' {
     enable_chghost?: boolean
     enable_echomessage?: boolean
     enable_setname?: boolean
+    auto_reconnect?: boolean
     version?: string | null
   }
 
@@ -45,7 +46,9 @@ declare module 'irc-framework' {
   export class Client {
     network?: NetworkInfo
     user?: { nick: string; username: string; host: string }
-    connect(options: ConnectOptions): void
+    /** Without options, reconnects with the previous ones. */
+    connect(options?: ConnectOptions): void
+    changeNick(nick: string): void
     quit(message?: string): void
     raw(line: string): void
     whois(nick: string, callback: (event: WhoisReply) => void): void

@@ -37,6 +37,17 @@ export function ircCaseFold(value: string, casemapping = 'rfc1459'): string {
   return casemapping === 'strict-rfc1459' ? folded : folded.replace(/\^/g, '~')
 }
 
+/** A person's id: the services account where the server tagged one (stable across nick changes), else the nick. */
+export function ircUserId(nick: string, account?: string): string {
+  return account ? `account:${account}` : `nick:${nick}`
+}
+
+/** The inverse of {@link ircUserId}; a bare string is read as a nick, which is what a person or model will type. */
+export function parseIrcUserId(id: string): { nick: string } | { account: string } {
+  if (id.startsWith('account:')) return { account: id.slice('account:'.length) }
+  return { nick: id.startsWith('nick:') ? id.slice('nick:'.length) : id }
+}
+
 export function isIrcChannel(target: string, chantypes: string | readonly string[] = '#&'): boolean {
   return chantypes.includes(target[0] ?? '')
 }
@@ -108,8 +119,7 @@ export function normalizeIrcMessage(
     // IRC has no threads; one constant keeps a channel's conversation in one session, as QQ does.
     thread: isDm ? 'dm' : 'channel',
     sender: {
-      // With account-tag the services account survives a nick change; without it the nick is all there is.
-      id: account ? `account:${account}` : `nick:${event.nick}`,
+      id: ircUserId(event.nick, account),
       // The IRCv3 bot-mode tag is the only bot flag IRC has.
       isBot: event.tags?.bot !== undefined || event.tags?.['draft/bot'] !== undefined,
       name: event.nick

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { NormalizedMessage } from '../src/messages/normalized.js'
-import { IrcConnection, type IrcConnectionDeps } from '../src/irc/connection.js'
-import { startTestServer, type TestServer, type TestServerOptions } from '../src/irc/test-server.js'
+import { IrcConnection, type IrcConnectionDeps } from '../src/platforms/irc/connection.js'
+import { startTestServer, type TestServer, type TestServerOptions } from '../src/platforms/irc/test-server.js'
 
 let server: TestServer | undefined
 let conn: IrcConnection | undefined
@@ -48,7 +48,7 @@ describe('the required half of PlatformConnection', () => {
     const c = await connect()
     await c.listChannels() // force the client past registration chatter
     const members = await c.listMembers('#cantina')
-    expect(members.map((m) => m.id).sort()).toEqual(['chewie', 'han', 'leia'])
+    expect(members.map((m) => m.id).sort()).toEqual(['nick:chewie', 'nick:han', 'nick:leia'])
   })
 
   it('lists channels from LIST', async () => {
@@ -62,6 +62,19 @@ describe('the required half of PlatformConnection', () => {
     const profile = await c.getUserProfile('han')
     expect(profile.name).toBe('han')
     expect(profile.realName).toBe('Real Name Of han')
+    expect(profile.id).toBe('nick:han')
+  })
+
+  it('reads a profile by the id a message sender carries', async () => {
+    const c = await connect()
+    expect((await c.getUserProfile('nick:han')).name).toBe('han')
+    expect(server!.received).toContain('WHOIS han')
+  })
+
+  it('refuses a query target that could inject a second command', async () => {
+    const c = await connect()
+    await expect(c.listMembers('#a\r\nQUIT')).rejects.toThrow(/invalid IRC target/)
+    await expect(c.getUserProfile('han\r\nQUIT')).rejects.toThrow(/invalid IRC target/)
   })
 
   it('tells a channel from a query by its prefix, not by a marker', async () => {
@@ -183,5 +196,85 @@ describe('outbound PRIVMSG', () => {
     const c = await connect()
     await expect(c.sendText('#cantina\r\nQUIT', 'x')).rejects.toThrow(/invalid IRC target/)
     await expect(c.sendText('#a #b', 'x')).rejects.toThrow(/invalid IRC target/)
+  })
+})
+
+describe('staying connected', () => {
+  const fast: IrcConnectionDeps = { reconnect: { baseMs: 10, maxMs: 50 } }
+  const withChannels = async (deps: IrcConnectionDeps = fast, options: TestServerOptions = {}) => {
+    server = await startTestServer(options)
+    conn = new IrcConnection(
+      { host: '127.0.0.1', port: server.port, tls: false, nick: 'agentconnect', channels: ['#cantina'] },
+      deps
+    )
+    await conn.start()
+    return conn
+  }
+
+  it('joins its channels once registered', async () => {
+    await withChannels()
+    await vi.waitFor(() => expect(server!.received).toContain('JOIN #cantina'))
+  })
+
+  it('reconnects after a drop and rejoins its channels', async () => {
+    const c = await withChannels()
+    await vi.waitFor(() => expect(server!.received).toContain('JOIN #cantina'))
+    server!.drop()
+    await vi.waitFor(() => expect(server!.connections()).toBe(2))
+    await vi.waitFor(() => expect(server!.received.filter((l) => l === 'JOIN #cantina')).toHaveLength(2))
+    const [receipt] = await c.sendText('#cantina', 'back')
+    expect(receipt!.confirmed).toBe(true)
+  })
+
+  it('fails a send while disconnected instead of dropping it silently', async () => {
+    const warnings: string[] = []
+    // A long backoff keeps it disconnected for the duration of the send.
+    const c = await withChannels({
+      reconnect: { baseMs: 60_000, maxMs: 60_000 },
+      log: { info: () => {}, warn: (m) => warnings.push(m) }
+    })
+    server!.drop()
+    await vi.waitFor(() => expect(warnings.join()).toMatch(/disconnected/))
+    await expect(c.sendText('#cantina', 'lost')).rejects.toThrow(/connection is down/)
+  })
+
+  it('takes an alternate nick when its own is still held by a ghost', async () => {
+    const seen: NormalizedMessage[] = []
+    server = await startTestServer({ takenNicks: ['agentconnect'] })
+    conn = new IrcConnection(
+      { host: '127.0.0.1', port: server.port, tls: false, nick: 'agentconnect' },
+      { onMessage: (m) => seen.push(m) }
+    )
+    await conn.start()
+    expect(server.received).toContain('NICK agentconnect_')
+    // Mentions follow the nick the server actually gave us.
+    server.push(':han!h@host PRIVMSG #cantina :agentconnect_: hi')
+    await vi.waitFor(() => expect(seen[0]?.mentionedBots).toEqual(['agentconnect_']))
+  })
+
+  it('does not reconnect after stop', async () => {
+    const c = await withChannels()
+    await c.stop()
+    await new Promise((r) => setTimeout(r, 100))
+    expect(server!.connections()).toBe(1)
+    conn = undefined
+  })
+})
+
+describe('long answers', () => {
+  it('cuts an answer at maxLines with a notice as the last line', async () => {
+    const c = await connect()
+    const receipts = await c.sendText('#cantina', Array.from({ length: 10 }, (_, i) => `line ${i}`).join('\n'), {
+      maxLines: 3
+    })
+    expect(receipts.map((r) => r.text)).toEqual(['line 0', 'line 1', '[… 8 more lines not sent]'])
+  })
+
+  it('keeps bold intact across a split, on the wire', async () => {
+    const c = await connect()
+    await c.sendText('#cantina', `\x02${'word '.repeat(150)}\x02`)
+    const lines = server!.received.filter((l) => l.startsWith('PRIVMSG'))
+    expect(lines.length).toBeGreaterThan(1)
+    for (const line of lines) expect([...line].filter((ch) => ch === '\x02').length % 2).toBe(0)
   })
 })

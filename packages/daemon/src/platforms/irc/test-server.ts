@@ -15,6 +15,8 @@ export interface TestServerOptions {
   channels?: { name: string; users: number; topic: string }[]
   /** Accept echo-message but never echo, to exercise the unconfirmed path. */
   withholdEcho?: boolean
+  /** Nicks already held by someone else, answered with 433 at registration. */
+  takenNicks?: string[]
 }
 
 export interface TestServer {
@@ -24,6 +26,12 @@ export interface TestServer {
   received: string[]
   /** Push a line at the connected client, e.g. an inbound PRIVMSG. */
   push(line: string): void
+  /** Drop the current client's socket, as a netsplit or ping timeout would. */
+  drop(): void
+  /** How many connections the server has accepted. */
+  connections(): number
+  /** Nicks a client may not take; mutable, so a test can release one. */
+  takenNicks: Set<string>
 }
 
 export async function startTestServer(options: TestServerOptions = {}): Promise<TestServer> {
@@ -33,12 +41,16 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
 
   const received: string[] = []
   let client: net.Socket | undefined
+  let accepted = 0
+  const takenNicks = new Set(options.takenNicks ?? [])
 
   const send = (line: string) => client?.write(line + '\r\n')
 
   const server = net.createServer((socket) => {
     client = socket
+    accepted++
     let nick = '*'
+    let userSent = false
     let buffer = ''
     let negotiating = false
     let registered = false
@@ -49,7 +61,7 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     // registration before the client has asked for anything, which is exactly
     // how this mock hid a working adapter behind four failing tests.
     const welcome = () => {
-      if (registered) return
+      if (registered || nick === '*' || !userSent) return
       registered = true
       send(`:server 001 ${nick} :Welcome to the test network`)
       send(`:server 005 ${nick} CHANTYPES=#& NETWORK=testnet :are supported`)
@@ -89,11 +101,19 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
             break
           }
 
-          case 'NICK':
-            nick = args[0] ?? '*'
+          case 'NICK': {
+            const wanted = args[0] ?? '*'
+            if (takenNicks.has(wanted)) {
+              send(`:server 433 ${nick} ${wanted} :Nickname is already in use`)
+              break
+            }
+            nick = wanted
+            if (!negotiating) welcome()
             break
+          }
 
           case 'USER':
+            userSent = true
             if (!negotiating) welcome()
             break
 
@@ -154,6 +174,9 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     port,
     received,
     push: (line) => send(line),
+    drop: () => client?.destroy(),
+    connections: () => accepted,
+    takenNicks,
     close: () =>
       new Promise<void>((resolve) => {
         client?.destroy()

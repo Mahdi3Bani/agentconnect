@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { IrcFloodGate } from '../src/irc/flood.js'
-import { IRC_LINE_MAX_BYTES, ircPayloadBudget, splitIrcText } from '../src/irc/split.js'
+import { IrcFloodGate } from '../src/platforms/irc/flood.js'
+import { IRC_LINE_MAX_BYTES, ircPayloadBudget, splitIrcText } from '../src/platforms/irc/split.js'
 
 const bytes = (s: string) => new TextEncoder().encode(s).length
 

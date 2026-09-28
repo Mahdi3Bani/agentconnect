@@ -1,16 +1,27 @@
 import { randomUUID } from 'node:crypto'
-import { ircCaseFold, normalizeIrcMessage, type IrcMessageEvent } from '@agentconnect.md/message'
-import IRC, { type Client as IrcClient, type MessageEvent as IrcFrameworkMessage } from 'irc-framework'
-import type { NormalizedMessage } from '../messages/normalized.js'
-import { PlatformSendQueue } from '../platforms/send-queue.js'
+import {
+  ircCaseFold,
+  ircUserId,
+  normalizeIrcMessage,
+  parseIrcUserId,
+  type IrcMessageEvent
+} from '@agentconnect.md/message'
+import IRC, {
+  type Client as IrcClient,
+  type ConnectOptions,
+  type MessageEvent as IrcFrameworkMessage
+} from 'irc-framework'
+import type { NormalizedMessage } from '../../messages/normalized.js'
+import { PlatformSendQueue } from '../send-queue.js'
 import type {
   PlatformChannelInfo,
   PlatformChannelRef,
   PlatformConnection,
   PlatformMemberRef,
   PlatformUserProfile
-} from '../platforms/contract.js'
+} from '../contract.js'
 import { IrcFloodGate } from './flood.js'
+import { carryFormatting, IRC_FORMATTING_CARRY_BYTES } from './render.js'
 import { ircPayloadBudget, splitIrcText } from './split.js'
 
 export interface IrcConnectionConfig {
@@ -23,6 +34,8 @@ export interface IrcConnectionConfig {
   /** SASL PLAIN, where the network supports it. */
   account?: { username: string; password: string }
   serverPassword?: string
+  /** Channels to join, and rejoin after every reconnect. */
+  channels?: string[]
 }
 
 export interface IrcConnectionDeps {
@@ -31,6 +44,9 @@ export interface IrcConnectionDeps {
   sleep?: (ms: number) => Promise<void>
   /** How long a send waits for its echo-message before reporting it unconfirmed. */
   echoTimeoutMs?: number
+  /** Reconnect backoff: doubles from `baseMs` up to `maxMs`, and never gives up while running. */
+  reconnect?: { baseMs: number; maxMs: number }
+  log?: { info(message: string): void; warn(message: string): void }
 }
 
 /** One PRIVMSG line as sent. `confirmed` means the server echoed it back; `id` is its msgid when tags were granted. */
@@ -64,22 +80,39 @@ type EchoWaiter = (receipt: { msgid?: string } | null) => void
 
 const DEFAULT_CHANNEL_PREFIXES = '#&'
 
+/** Refuse anything that could end or extend the raw line a target is interpolated into. */
+function assertIrcTarget(target: string): void {
+  if (!/^[^\s,:\x00][^\s,\x00]*$/.test(target)) throw new Error(`invalid IRC target: ${JSON.stringify(target)}`)
+}
+
 function timeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
   return Promise.race([
     promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${what} timed out`)), ms))
-  ])
+    new Promise<T>((_, reject) => (timer = setTimeout(() => reject(new Error(`${what} timed out`)), ms)))
+  ]).finally(() => clearTimeout(timer))
 }
 
 export class IrcConnection implements PlatformConnection {
   readonly botUserId: string
   private client: IrcClient
-  private ready = false
+  // Set once start() succeeds; a close before that fails start() instead of reconnecting.
+  private started = false
+  private stopping = false
+  // Registered on the current socket: the state a send checks, false between a drop and the next 001.
+  private registered = false
+  private reconnecting = false
+  private nickAttempt = 0
+  private failStart?: (error: Error) => void
+  private registrationOutcome?: (registered: boolean) => void
   private negotiated = new Set<string>()
   private readonly queue: PlatformSendQueue
   private readonly flood: IrcFloodGate
   private readonly now: () => number
+  private readonly sleep: (ms: number) => Promise<void>
   private localSeq = 0
+  // Last nick seen per services account, so an `account:` id can still be WHOISed.
+  private readonly nickByAccount = new Map<string, string>()
   // Sends awaiting their echo, FIFO per (target, text): the server echoes in the order it received them.
   private readonly awaitingEcho = new Map<string, EchoWaiter[]>()
 
@@ -90,6 +123,7 @@ export class IrcConnection implements PlatformConnection {
     this.botUserId = config.nick
     this.client = new IRC.Client()
     this.now = deps.now ?? (() => Date.now())
+    this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms).unref?.()))
     this.flood = new IrcFloodGate(undefined, undefined, this.now, deps.sleep)
     // The flood gate does the spacing; the queue contributes FIFO order and the per-task timeout.
     this.queue = new PlatformSendQueue(0, this.now, deps.sleep)
@@ -98,47 +132,113 @@ export class IrcConnection implements PlatformConnection {
   // ── 1. transport lifecycle ──
 
   async start(): Promise<void> {
-    await timeout(
-      new Promise<void>((resolve, reject) => {
-        this.client.on('registered', () => {
-          this.ready = true
-        })
-        // ISUPPORT (005) lands after 001 but before end-of-MOTD (376, or 422 without one), so resolving there means it is read.
-        this.client.on('motd', () => resolve())
-        this.client.on('privmsg', (event: IrcFrameworkMessage) => this.onInbound('privmsg', event))
-        this.client.on('action', (event: IrcFrameworkMessage) => this.onInbound('action', event))
-        this.client.on('socket close', () => {
-          if (!this.ready) reject(new Error('connection closed before registration'))
-        })
+    this.client.on('registered', () => this.onRegistered())
+    this.client.on('nick in use', () => this.onNickInUse())
+    this.client.on('socket close', () => this.onSocketClose())
+    this.client.on('privmsg', (event: IrcFrameworkMessage) => this.onInbound('privmsg', event))
+    this.client.on('action', (event: IrcFrameworkMessage) => this.onInbound('action', event))
+    const ready = new Promise<void>((resolve, reject) => {
+      // ISUPPORT (005) lands after 001 but before end-of-MOTD (376, or 422 without one), so resolving there means it is read.
+      this.client.on('motd', () => resolve())
+      this.failStart = reject
+    })
+    this.client.connect(this.connectOptions())
+    try {
+      await timeout(ready, 30_000, 'IRC registration')
+    } catch (error) {
+      this.stopping = true
+      this.client.quit()
+      throw error
+    }
+    this.started = true
+  }
 
-        this.client.connect({
-          host: this.config.host,
-          port: this.config.port,
-          tls: this.config.tls,
-          nick: this.config.nick,
-          username: this.config.username ?? this.config.nick,
-          gecos: this.config.realname ?? this.config.nick,
-          password: this.config.serverPassword,
-          account: this.config.account,
-          enable_chghost: true,
-          // Both are opt-in in irc-framework. echo-message is what turns a
-          // send into a confirmed send, so delivery state depends on asking.
-          enable_echomessage: true,
-          enable_setname: true,
-          version: null
-        })
-      }),
-      30_000,
-      'IRC registration'
-    )
+  private connectOptions(): ConnectOptions {
+    return {
+      host: this.config.host,
+      port: this.config.port,
+      tls: this.config.tls,
+      nick: this.config.nick,
+      username: this.config.username ?? this.config.nick,
+      gecos: this.config.realname ?? this.config.nick,
+      password: this.config.serverPassword,
+      account: this.config.account,
+      enable_chghost: true,
+      // Opt-in in irc-framework, and what turns a send into a confirmed send.
+      enable_echomessage: true,
+      enable_setname: true,
+      // Its own reconnect gives up after 3 failures and skips a server that closes before 001; see reconnect().
+      auto_reconnect: false,
+      version: null
+    }
+  }
 
+  private onRegistered(): void {
+    this.registered = true
+    this.nickAttempt = 0
+    // Re-read on every registration: a reconnect can land on a different server of the same network.
+    this.negotiated.clear()
     for (const cap of WANTED_CAPS) {
       if (this.client.network?.cap?.isEnabled(cap)) this.negotiated.add(cap)
+    }
+    this.registrationOutcome?.(true)
+    void this.joinChannels()
+  }
+
+  private async joinChannels(): Promise<void> {
+    for (const channel of this.config.channels ?? []) {
+      try {
+        assertIrcTarget(channel)
+      } catch {
+        this.deps.log?.warn(`irc: not joining invalid channel ${JSON.stringify(channel)}`)
+        continue
+      }
+      await this.flood.take()
+      if (!this.registered) return
+      this.client.raw(`JOIN ${channel}`)
+    }
+  }
+
+  // After a drop the old connection often still holds the nick until the server times it out.
+  private onNickInUse(): void {
+    if (this.registered) return
+    const attempt = ++this.nickAttempt
+    const nick = attempt <= 2 ? this.config.nick + '_'.repeat(attempt) : `${this.config.nick}${attempt}`
+    this.deps.log?.warn(`irc: nick in use; trying ${nick}`)
+    this.client.changeNick(nick)
+  }
+
+  private onSocketClose(): void {
+    this.registered = false
+    this.registrationOutcome?.(false)
+    if (!this.started) this.failStart?.(new Error('connection closed before registration'))
+    else if (!this.stopping) void this.reconnect()
+  }
+
+  private async reconnect(): Promise<void> {
+    if (this.reconnecting) return
+    this.reconnecting = true
+    const { baseMs, maxMs } = this.deps.reconnect ?? { baseMs: 1_000, maxMs: 300_000 }
+    try {
+      for (let attempt = 0; !this.stopping && !this.registered; attempt++) {
+        const wait = Math.min(maxMs, baseMs * 2 ** Math.min(attempt, 20))
+        this.deps.log?.warn(`irc: disconnected from ${this.config.host}; reconnecting in ${wait}ms`)
+        await this.sleep(wait)
+        if (this.stopping) return
+        const outcome = new Promise<boolean>((resolve) => (this.registrationOutcome = resolve))
+        this.client.connect()
+        const registered = await timeout(outcome, 30_000, 'IRC registration').catch(() => false)
+        this.registrationOutcome = undefined
+        if (registered) this.deps.log?.info(`irc: reconnected to ${this.config.host}`)
+      }
+    } finally {
+      this.reconnecting = false
     }
   }
 
   async stop(): Promise<void> {
-    this.ready = false
+    this.stopping = true
+    this.registered = false
     for (const waiters of this.awaitingEcho.values()) for (const settle of waiters) settle(null)
     this.awaitingEcho.clear()
     this.client.quit('disconnecting')
@@ -194,6 +294,11 @@ export class IrcConnection implements PlatformConnection {
       if (waiters && !waiters.length) this.awaitingEcho.delete(key)
       return
     }
+    if (tags.account) {
+      this.nickByAccount.delete(tags.account)
+      this.nickByAccount.set(tags.account, event.nick)
+      if (this.nickByAccount.size > 5000) this.nickByAccount.delete(this.nickByAccount.keys().next().value!)
+    }
     const msg = normalizeIrcMessage(
       {
         kind,
@@ -217,22 +322,29 @@ export class IrcConnection implements PlatformConnection {
   // ── outbound ──
 
   /** Split to fit the relayed 512-byte line, pace under flood control, and resolve once each line is echoed or times out. */
-  async sendText(target: string, text: string): Promise<IrcSendReceipt[]> {
-    // The target is interpolated into a raw line, so anything that could end or extend it is refused outright.
-    if (!/^[^\s,:\x00][^\s,\x00]*$/.test(target)) throw new Error(`invalid IRC target: ${JSON.stringify(target)}`)
+  async sendText(target: string, text: string, options: { maxLines?: number } = {}): Promise<IrcSendReceipt[]> {
+    assertIrcTarget(target)
     const budget = ircPayloadBudget('PRIVMSG', target, {
       nick: this.nick,
       username: this.client.user?.username,
       host: this.client.user?.host
     })
+    let lines = splitIrcText(text, budget - IRC_FORMATTING_CARRY_BYTES)
+    const { maxLines } = options
+    if (maxLines !== undefined && lines.length > maxLines) {
+      const dropped = lines.length - (maxLines - 1)
+      lines = [...lines.slice(0, maxLines - 1), `[… ${dropped} more lines not sent]`]
+    }
     const echo = this.negotiated.has('echo-message')
-    const receipts = splitIrcText(text, budget).map(async (line): Promise<IrcSendReceipt> => {
+    const receipts = carryFormatting(lines).map(async (line): Promise<IrcSendReceipt> => {
       const key = this.echoKey(target, line)
       let settle: EchoWaiter = () => {}
       const echoed = new Promise<{ msgid?: string } | null>((resolve) => (settle = resolve))
       await this.queue.enqueue(
         async () => {
           // Registered before the write so an echo cannot arrive ahead of its waiter.
+          // irc-framework drops a write on a closed socket silently, so a send between drop and 001 fails here instead.
+          if (!this.registered) throw new Error('IRC connection is down')
           if (echo) this.awaitingEcho.set(key, [...(this.awaitingEcho.get(key) ?? []), settle])
           this.client.raw(`PRIVMSG ${target} :${line}`)
         },
@@ -277,10 +389,12 @@ export class IrcConnection implements PlatformConnection {
 
   async listMembers(channel: string): Promise<PlatformMemberRef[]> {
     if (!this.isChannel(channel)) {
-      return [{ id: channel, name: channel }]
+      return [{ id: ircUserId(channel), name: channel }]
     }
-    // `userlist` only fires for channels the client has joined, and this has to
-    // answer for any channel -- so read RPL_NAMREPLY/RPL_ENDOFNAMES directly.
+    assertIrcTarget(channel)
+    // Paced before the timeout starts, so a busy flood gate cannot eat into the reply window.
+    await this.flood.take()
+    // `userlist` only fires for joined channels and this answers for any, so it reads RPL_NAMREPLY/RPL_ENDOFNAMES itself.
     const nicks = await timeout(
       new Promise<string[]>((resolve) => {
         const collected: string[] = []
@@ -307,11 +421,12 @@ export class IrcConnection implements PlatformConnection {
       10_000,
       `NAMES ${channel}`
     )
-    // IRC has no bot flag, so isBot is left unset rather than guessed.
-    return nicks.map((nick) => ({ id: nick, name: nick }))
+    // NAMES carries no bot flag or account, so isBot is left unset and ids are nick ids.
+    return nicks.map((nick) => ({ id: ircUserId(nick), name: nick }))
   }
 
   async listChannels(): Promise<PlatformChannelRef[]> {
+    await this.flood.take()
     const channels = await timeout(
       new Promise<Array<{ channel: string; num_users: number; topic: string }>>((resolve) => {
         this.client.once('channel list', (list: Array<{ channel: string; num_users: number; topic: string }>) =>
@@ -325,21 +440,21 @@ export class IrcConnection implements PlatformConnection {
     return channels.map((c) => ({ id: c.channel, name: c.channel, isPrivate: false }))
   }
 
+  /** Takes an `ircUserId` or a bare nick; an account id resolves through the last nick seen using it. */
   async getUserProfile(user: string): Promise<PlatformUserProfile> {
+    const parsed = parseIrcUserId(user)
+    const nick = 'nick' in parsed ? parsed.nick : this.nickByAccount.get(parsed.account)
+    if (!nick) return { id: user }
+    assertIrcTarget(nick)
+    await this.flood.take()
     const whois = await timeout(
       new Promise<{ nick: string; real_name?: string; account?: string }>((resolve) => {
-        this.client.whois(user, (event: { nick: string; real_name?: string; account?: string }) => resolve(event))
+        this.client.whois(nick, (event: { nick: string; real_name?: string; account?: string }) => resolve(event))
       }),
       10_000,
-      `WHOIS ${user}`
+      `WHOIS ${nick}`
     )
-    return {
-      // With account-tag the account is the identity that survives a nick
-      // change; without it, the nick is the best available and is not stable.
-      id: whois.account ?? whois.nick,
-      name: whois.nick,
-      realName: whois.real_name
-    }
+    return { id: ircUserId(whois.nick, whois.account), name: whois.nick, realName: whois.real_name }
   }
 
   /** IRC has no attachments, in either direction. */
