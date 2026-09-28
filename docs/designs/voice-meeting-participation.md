@@ -7,11 +7,11 @@
 > vendor documentation on the same date and are the part of this document most likely
 > to go stale.
 >
-> **Scope:** daemon and protocol, with one console surface per phase. Every chat
-> platform the daemon owns is assessed; the external meeting products (Google Meet,
-> Zoom, Microsoft Teams, Slack huddles) are assessed as a separate provider seam. Speech
-> models are external services in every phase — no Claude or Codex runtime accepts
-> audio today (§3.7).
+> **Scope:** daemon and protocol, a meeting runner the daemon dials, and one console
+> surface per phase. Google Meet is the first room by product priority (§6.2); every chat
+> platform the daemon owns is assessed too, and Zoom, Microsoft Teams and Slack huddles
+> follow Meet through the same runner seam. Speech models are external services in every
+> phase — no Claude or Codex runtime accepts audio today (§3.7).
 >
 > Related documents:
 > [architecture.md](architecture.md) (the Control Plane stays off the hot path — audio is
@@ -54,17 +54,21 @@ The answer, up front:
   turns audio into channel-record rows and spoken replies, and turn-taking rules on top of
   machinery the daemon already has — steering into a live turn, the addressing ladder,
   the Decision gate, and the turn output surface.
-- **Discord is the only platform the daemon already owns whose voice API is open** (§3.1).
-  It is the first real room. Slack has no huddle API and forbids bots in huddles (§3.2);
-  Telegram's Bot API cannot join a group call (§3.6); Google Meet's media API is
-  receive-only and gated (§3.3); Zoom's streaming API is receive-only and its participant
-  SDK is native C++ (§3.4); Teams' media bot is .NET on Windows (§3.5). External meetings
-  are therefore a **provider seam** (§5.5, phase 3), fronted by a meeting-bot service the
-  organization runs or subscribes to, never by browser automation the daemon owns.
-- **The first shippable slice is voice notes** (§6.1): every platform already delivers
-  audio files the daemon drops or hands over as an opaque link. Transcribing them and
-  answering with a spoken note is a small change on the attachment path and is the
-  foundation the rooms stand on.
+- **Google Meet is the first room** (§6.2): the agent joins a meeting as a participant and
+  transcribes it. Google's own real-time media API is receive-only and preview-gated (§3.3),
+  so the participant is a **meeting runner** — a browser-driving process beside the daemon,
+  first-party or an adopted open-source one — that reads Meet's live captions or streams the
+  call's audio to the speech seam, while the daemon owns the record and the routing (§5.5).
+  Google's official post-meeting transcript API complements it where the organization has it.
+- **Discord is the only platform the daemon already owns whose voice API is open** (§3.1),
+  so it is the one native driver, after Meet (§6.4). Slack has no huddle API and forbids bots
+  in huddles (§3.2); Telegram's Bot API cannot join a group call (§3.6); Zoom's streaming API
+  is receive-only and its participant SDK is native C++ (§3.4); Teams' media bot is .NET on
+  Windows (§3.5). Zoom and Teams follow Meet through the runner seam; huddles only with a
+  runner the organization brings.
+- **Voice notes are the smallest slice and the speech-provider seam** (§6.1): every platform
+  already delivers audio files the daemon drops or hands over as an opaque link. Phase 1 does
+  not wait on them — Meet supplies its own captions — and the two proceed in parallel.
 
 ## 2. What "join a meeting" has to mean for a coding agent
 
@@ -75,7 +79,7 @@ reply. AgentConnect drives Claude Code or Codex over ACP: `AcpHost.prompt`
 (`packages/daemon/src/acp/acp-host.ts:1258`) is one blocking `session/prompt`, the runtime
 reads files, runs tools and thinks, and a turn that touches a repository routinely runs a
 minute or more. Speech-to-speech models that bypass the runtime would answer fast and would
-not be the agent the user asked for; §6.6 rejects that shortcut.
+not be the agent the user asked for; §6.7 rejects that shortcut.
 
 So the agent in a meeting is not the party you take turns with. It is the colleague who
 sits in, says "let me check" when asked, and comes back with an answer while the
@@ -136,16 +140,16 @@ clearly asking you" rather than a keyword.
 What each platform lets a bot do in a call, checked on 2026-09-28. "Bot" here means an
 application identity, not a signed-in human account.
 
-| Platform              | Bot joins the call           | Receives audio                                                         | Sends audio      | Verdict                              |
-| --------------------- | ---------------------------- | ---------------------------------------------------------------------- | ---------------- | ------------------------------------ |
-| Discord voice channel | Yes, gateway voice           | Per speaker, decrypted with DAVE                                       | Yes              | **First room** (§6.2)                |
-| Slack huddles         | No API; bots are blocked     | Only through a signed-in human account in a browser                    | Same             | Provider seam only, flagged (§3.2)   |
-| Google Meet           | Media API: no participant    | Media API: receive-only, developer preview, every participant enrolled | No               | Provider seam (headless participant) |
-| Zoom                  | Meeting SDK for Linux (C++)  | RTMS (GA, receive-only) or SDK raw audio                               | SDK only         | Provider seam                        |
-| Microsoft Teams       | Graph calling bot            | App-hosted media, .NET on Windows only                                 | Same             | Provider seam                        |
-| Feishu / Lark         | No real-time media API found | Post-meeting recordings and Minutes                                    | No               | Not a room; voice notes only (§3.6)  |
-| Telegram              | Bot API cannot join calls    | User account over MTProto only                                         | Same             | Not a room; voice notes only         |
-| Webchat (console)     | Our own surface              | Browser microphone                                                     | Browser playback | Second room, one human (§6.3)        |
+| Platform              | Bot joins the call                                    | Receives audio                                                                                                | Sends audio             | Verdict                                   |
+| --------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------- | ----------------------------------------- |
+| Discord voice channel | Yes, gateway voice                                    | Per speaker, decrypted with DAVE                                                                              | Yes                     | **Native driver** (§6.4)                  |
+| Slack huddles         | No API; bots are blocked                              | Only through a signed-in human account in a browser                                                           | Same                    | Provider seam only, flagged (§3.2)        |
+| Google Meet           | Media API: no participant; a browser participant does | Media API: receive-only, developer preview, every participant enrolled; a participant reads captions or audio | Participant only (§6.3) | **First room** (§6.2), through the runner |
+| Zoom                  | Meeting SDK for Linux (C++)                           | RTMS (GA, receive-only) or SDK raw audio                                                                      | SDK only                | Provider seam                             |
+| Microsoft Teams       | Graph calling bot                                     | App-hosted media, .NET on Windows only                                                                        | Same                    | Provider seam                             |
+| Feishu / Lark         | No real-time media API found                          | Post-meeting recordings and Minutes                                                                           | No                      | Not a room; voice notes only (§3.6)       |
+| Telegram              | Bot API cannot join calls                             | User account over MTProto only                                                                                | Same                    | Not a room; voice notes only              |
+| Webchat (console)     | Our own surface                                       | Browser microphone                                                                                            | Browser playback        | Second room, one human (§6.4)             |
 
 ### 3.1 Discord
 
@@ -186,13 +190,39 @@ new transport.
 
 ### 3.3 Google Meet
 
-The Meet Media API gives an app the conference's real-time audio and video over WebRTC —
-and only that. Every media stream is receive-only, so an app cannot speak; the API is in
-developer preview; and the Cloud project, the OAuth principal, and **every participant** of
-the conference must be enrolled in the preview program. That rules it out for a product
-feature. Meeting-bot products (Recall.ai, Attendee, Vexa, ScreenApp) join Meet as an
-ordinary participant from a headless Chrome instead, and that is what the provider seam
-gets for Meet.
+Four routes exist. The first room (§6.2) uses the third and, where the organization has it,
+the second.
+
+- **Meet Media API — unusable for a product feature.** It gives an app the conference's
+  real-time audio and video over WebRTC, receive-only, and as of 2026-09-03 it is still in
+  developer preview: the Cloud project, the OAuth principal, and **every participant** of the
+  conference must be enrolled in the preview program, or the app gets no data. It could not
+  speak even if it were open. It is the right API to move to if it reaches general
+  availability, and the runner contract (§5.5) is written so a Media-API implementer replaces
+  the browser one without changing the daemon.
+- **Meet REST API transcripts — official, after the meeting.** `conferenceRecords.transcripts`
+  and `.entries` return Google's own per-speaker transcript, and the Workspace Events API
+  delivers `google.workspace.meet.conference.v2.started` and
+  `google.workspace.meet.transcript.v2.fileGenerated` to a subscriber over Pub/Sub. It needs a
+  Workspace plan with Meet transcription, someone in the meeting to have turned transcription
+  on (there is no API to start it), and it lands after the meeting ends. It is not "joining",
+  but it is the authoritative record of what was said at no speech cost, and phase 1 takes
+  it where it exists (§6.2).
+- **A browser participant — what every Meet bot is.** Recall.ai, Vexa, Attendee and ScreenApp
+  all join Meet from a headless Chromium as an ordinary participant. Two transcript sources
+  are then available. Google's **live captions**, which the participant turns on for itself
+  and reads from the page: speaker-labelled, free, in Google's languages, and brittle because
+  Meet's DOM is not a public API — a class name or aria label can change with any Meet
+  release, which is why every open-source bot carries its selectors as data. And the call's
+  **audio**, captured from the page and sent to the speech seam (§5.1): provider minutes,
+  but no DOM dependence, and it works where captions do not. The runner (§5.5) offers both.
+- **Admission is the real constraint.** Since March 2026 Meet's safeguarded admit flow
+  screens third-party bots knocking as guests and flags them to the host as a potential
+  risk; with "anyone can ask to join" off they are denied without a prompt. A participant
+  signed in as a **Workspace account in the organization's domain**, on the calendar invite,
+  joins without the lobby. The runner therefore holds a dedicated Google account for the
+  agent — a persisted browser profile in a volume, signed in once by the operator — and
+  knocks as a guest only as the fallback the console warns about.
 
 ### 3.4 Zoom
 
@@ -258,12 +288,13 @@ The room design in §5 is mostly composition. The pieces, and where each falls s
 | Webchat browser socket          | `packages/relay/src/relay-browser-server.ts:27`; frames `packages/protocol/src/frames/relay-daemon.ts:314-331` | JSON text only (binary frames are dropped, `packages/connection/src/ws-server-transport.ts:40`); 256 KiB cap; request-plus-ack per hop |
 | Daemon packaging                | `packages/daemon/tsdown.config.ts`, `scripts/assert-self-contained.mjs`, `docker/Dockerfile:168-232`           | One self-contained bundle with no runtime dependencies; no native addons; no ffmpeg in the image; Windows CI                           |
 
-Two of these decide the shape of phase 1. The **packaging rule** means codecs and DAVE
-must be pure JavaScript or WASM (`opusscript`, `libsodium-wrappers` or `node:crypto`
-AES-GCM, `@snazzah/davey`'s WASM build) and any native acceleration stays an optional
-external like `bufferutil` is today. The **text-only webchat socket** means a live
-microphone needs a new leg (§6.3), while everything after transcription — the turn, the
-steer, the written reply — rides the socket unchanged.
+Two of these decide where things run. The **packaging rule** is why a meeting runner is a
+separate process the daemon dials (§5.5) rather than a browser inside the daemon, and why the
+native Discord driver of phase 3 must use pure JavaScript or WASM codecs and DAVE
+(`opusscript`, `libsodium-wrappers` or `node:crypto` AES-GCM, `@snazzah/davey`'s WASM build)
+with any native acceleration kept an optional external like `bufferutil` is today. The
+**text-only webchat socket** means a live microphone needs a new leg (§6.4), while everything
+after transcription — the turn, the steer, the written reply — rides the socket unchanged.
 
 ## 5. Design
 
@@ -328,10 +359,11 @@ identity in the module, sequencing in core — and it holds the two rules of the
 design: no platform name in core, and no manifest field, because nothing reads a room
 capability before dispatch.
 
-Where a room runs is where the daemon runs. Self-hosted, that is the operator's machine;
-in the managed pool, the pod — which must be allowed UDP egress to Discord's voice servers
-(§7). A room is a long-lived connection like a Slack socket, not a session, and survives
-the agent's turns coming and going.
+A room's transport runs where its driver runs: a native driver (Discord, §6.4) inside the
+daemon process, which then needs UDP egress to the platform's voice servers (§7); a runner
+driver (§5.5) inside the runner, with the daemon holding only the socket to it. Either way a
+room is a long-lived connection like a Slack socket, not a session, and survives the agent's
+turns coming and going.
 
 ### 5.3 Records
 
@@ -350,9 +382,10 @@ the agent's turns coming and going.
 - **Audio is never persisted.** No recording, no buffering beyond what segmentation needs,
   no copy on the Control Plane. Recording as a product feature is out of scope and would be
   its own design with its own consent model.
-- **Announce on join.** The room speaks a one-line notice ("<agent> has joined and is
-  transcribing") and posts it to the companion; on by default, per-organization switch.
-  Many jurisdictions require notice before transcription, and the notice is also how
+- **Announce on join.** The room announces itself — spoken where it can speak, posted to the
+  meeting's own chat where it cannot yet (phase 1) — and posts the same line to the
+  companion: "<agent> has joined and is transcribing". On by default, per-organization
+  switch. Many jurisdictions require notice before transcription, and the notice is also how
   humans learn the agent is listening.
 - **Audience.** The session's audience is the room's participants
   ([session-visibility.md](session-visibility.md)), resolved through the platform's identity
@@ -372,47 +405,60 @@ same place platform context is injected today: the agent is told it is in a voic
 who is in it, that the first three sentences of its reply will be spoken, and to put detail
 after them.
 
-### 5.5 The meeting-provider seam
+### 5.5 The meeting runner seam
 
-External meetings do not get a platform module. A `MeetingBotProvider` is a second
-implementer of `VoiceRoomDriver` whose transport is a service the daemon dials: it joins a
-meeting by URL, streams mixed or per-speaker audio to the daemon over a WebSocket, accepts
-audio to play, and reports participants. The room's conversation coordinate is
-`meeting:<provider>:<meetingId>`, and its text companion is whichever chat the join was
-requested from (the Slack thread where someone said "join this meeting").
+External meetings do not get a platform module, and the daemon never drives a browser or
+links a meeting SDK (the packaging rule of §4; §6.7). A **meeting runner** is a separate
+process the daemon dials — the same shape as the sandbox pod of
+[cluster-spawn-and-shim.md](cluster-spawn-and-shim.md): a container beside the daemon in
+Compose, or a pod the pool spawns per meeting. Its `VoiceRoomDriver` implementer (§5.2)
+speaks one small protocol over one authenticated WebSocket per meeting:
 
-Two provider kinds cover the market:
+```ts
+// daemon → runner
+join: { url; displayName; account?: 'workspace' | 'guest'; sources: ('captions' | 'audio')[] }
+leave: {}
+speak: { audio: TtsStream } // phase 2
+// runner → daemon
+state: { phase: 'knocking' | 'joined' | 'denied' | 'ended'; reason? }
+participants: { list: { id; name; isBot? }[] }
+caption: { speaker; text; final: boolean; at } // Meet's own captions
+audio: { pcm; at } // mixed call audio, for the speech seam
+chat: { from; text; at } // the meeting's text chat
+```
 
-- **Hosted**: Recall.ai (Zoom, Meet, Teams, Webex, Slack huddles through a desktop SDK)
-  with real-time audio in both directions over WebSocket.
-- **Self-hosted**: an open-source meeting-bot runner the organization deploys beside its
-  daemons — Attendee, Vexa, or ScreenApp's bot, all of which join Meet and Teams from a
-  headless Chrome and Zoom through the Meeting SDK; audio output support differs by
-  project and by version (Attendee lists it on its roadmap), so the implementer to pick is
-  a phase-3 decision.
+The runner owns the browser, the account, caption and audio capture, and the meeting's chat;
+the daemon owns everything after that — the channel record, addressing, dispatch, and in
+phase 2 the spoken surface. A first-party runner is small: Playwright over Chromium, one page
+per meeting, no GPU. The same contract admits an adopted implementer — Vexa (Apache-2.0;
+joins Meet, Teams and Zoom; Whisper transcription with speaker attribution; transcripts by
+polling today; speaking not in its open core) or Recall.ai as a hosted one — so an
+organization swaps runners without a daemon release, and a Media-API implementer replaces the
+browser one the day Google opens it (§3.3). The room's conversation coordinate is
+`meeting:<provider>:<meetingId>`; its text companion is the chat the join was requested from.
 
-The daemon never automates a browser and never links a meeting SDK. That keeps the
-packaging rule, keeps Zoom and Teams entitlements out of the daemon's configuration, and
-lets an organization swap providers without a daemon release. A **join** is requested from
-chat ("@agent join https://meet.google.com/…") or by a calendar trigger, which is future
-work on the cron/hook seam.
+A runner is configured per organization — its URL and token, and the agent's Google account
+status — and the daemon reports it as a capability, `meeting-runner-v1`, so the
+`joinMeeting` tool is injected only where one exists.
 
 ### 5.6 Console
 
 Product conventions apply: no internal component names, audience language for visibility.
 
+- Organization settings: the meeting runner (§5.5) — URL, token, the agent's account status,
+  whether a guest knock is allowed as the fallback.
 - Agent settings, per platform that has a room driver: enable voice, room mode default,
   speech provider, voice, language, announce-on-join, spoken-reply cap.
 - Session detail: the existing transcript view shows utterance rows with a speaker label,
   a small `voice` badge and the offset; the join/leave notices are ordinary chrome rows.
-- Phase 2 adds the console's own microphone and playback controls to the Playground.
+- Phase 3 adds the console's own microphone and playback controls to the Playground.
 
 ## 6. Phases
 
 ### 6.1 Phase 0 — voice notes (all platforms)
 
-The smallest change that answers "talk in voice with agent", and the foundation for the
-rest.
+The smallest change that answers "talk in voice with agent", and the speech-provider seam
+every later phase with audio uses. It does not gate phase 1, which reads Meet's own captions.
 
 1. `Attachment` gains `kind: 'voice'` plus `durationMs`. Telegram maps `voice`, `audio`
    and `video_note`; Feishu maps its audio type; Discord reads the voice-message flag;
@@ -491,127 +537,194 @@ Cost: normalizers, one intake-ladder step, the host route's transcription step a
 `rc/bot-assign` projection, one attachment-path change, a provider seam with one implementer,
 and a Provider keys entry. No new connection, no codec, no packaging change.
 
-### 6.2 Phase 1 — Discord voice channels (the first room)
+### 6.2 Phase 1 — Google Meet: join and transcribe (the first room)
 
-1. `@discordjs/voice` with `@snazzah/davey`; `GuildVoiceStates` intent; `CONNECT` and
-   `SPEAK` in the invite permissions (both copies). Pure-JS/WASM Opus and encryption; any
-   native speedup stays external. The voice facet is absent on platforms that cannot load
-   it, and the Windows unit suites skip the room tests.
-2. The Discord `VoiceRoomDriver`: join by channel id, one decoded PCM stream per speaker,
-   bot speakers dropped at the source, Opus playback with cancel.
-3. The voice host in core (§5.2–§5.4): segmentation, channel-record rows, the addressing
-   ladder with aliases and the Decision fallback, dispatch and steer, the spoken surface,
-   the prompt hint, announce-on-join.
-4. Entry points: the `joinVoiceChannel`/`leaveVoiceChannel` tools gated by the read-port
-   style registry, and a `/voice join|leave` slash command beside the existing command
-   chrome. A room ends when the channel empties or the agent is told to leave.
-5. Console: the agent's Discord settings gain the voice block (§5.6); the session detail
-   view gains the speaker label.
+The `listen` mode of §2.2 on Google Meet: an agent joins a meeting, transcribes it into the
+channel record as it happens, and hands the team the result. No speaking and no addressing;
+those are phase 2.
 
-Behind a `voice.discord` feature flag until the receive path has run in production for a
-release, because of §3.1's second fact.
+1. **The runner** (§5.5), first-party: `docker/meet-runner` — Playwright and Chromium, a
+   persisted profile volume for the agent's Workspace account — as a Compose service beside
+   the daemon and a pool-spawned pod in Cloud. It joins by URL, turns captions on, and streams
+   `caption` events. `audio` is behind a flag and used when captions are off or unavailable,
+   or the organization prefers its own speech provider (which then needs phase 0's seam).
+2. **The voice host in core** (§5.2–§5.3): the Meet `VoiceRoomDriver`; caption coalescing
+   into final utterances — Meet rewrites a caption in place while a speaker talks, so a row is
+   written only when its text settles; one channel-record row per utterance with the `voice`
+   annotation; participants as the session audience; the announce-on-join line posted to the
+   meeting's chat, since nothing speaks yet.
+3. **Entry points**: the `joinMeeting`/`leaveMeeting` tools, injected where a runner is
+   configured, so "@agent join https://meet.google.com/…" in Slack or the console works; the
+   requesting thread is the text companion and receives the joined, denied, and left notices.
+   A calendar-driven join — the Workspace Events `conference.v2.started` event for meetings
+   the agent's account is invited to, on the trigger seam — is phase 1b, not a blocker.
+4. **The result**: when the runner reports `ended`, the voice host activates the agent once
+   with a meeting-ended prompt, so the agent posts what a meeting produces — a summary,
+   decisions, action items, links to the work it was asked for — into the companion thread,
+   and the whole transcript stays readable in the session view. Where the organization has
+   Meet transcription, the official `transcript.v2.fileGenerated` event fetches Google's
+   transcript into the same record as the authoritative copy (§3.3), which also covers a
+   meeting the runner was not in.
+5. **Console**: the organization's runner settings, a meetings row on the agent, and the
+   speaker label and offset in the session transcript view.
 
-### 6.3 Phase 2 — webchat voice (one human, the console)
+Behind a `voice.meet` feature flag until the caption path has run against Meet's DOM across
+one release. The runner's selectors are versioned with the runner, not the daemon, so a Meet
+UI change ships as a runner update.
 
-Audio cannot ride the webchat socket (§4). Two options, one recommended:
+### 6.3 Phase 2 — Google Meet: addressed and speaking
 
-- **Recommended: a media leg beside the socket.** The browser captures the microphone and
-  sends 20 ms Opus frames over a second WebSocket at the relay, authenticated with the
-  same conversation token, which the relay forwards to the owning daemon over a
-  capability-gated binary `rd/*` stream; playback comes back the same way. The daemon runs
-  the same voice host as Discord with a `webchat` room driver. The relay still persists
-  nothing and the Control Plane still carries nothing. WebRTC through a media server is
-  the same shape at higher cost and is not needed for one speaker.
-- **Fallback: browser-side recognition.** The console transcribes with the browser's own
-  speech API and sends ordinary `turn` and `steer: true` frames; playback uses browser
-  speech synthesis. Zero server audio, no provider cost, uneven quality and privacy across
-  browsers. Worth shipping as the no-provider mode, not as the design.
+The full room on Meet: the `addressed` and `talk-back` modes, the runner's `speak` (synthesized
+audio into a virtual microphone, the PipeWire or PulseAudio virtual-device shape every speaking
+bot uses), the spoken turn output surface (§5.4), acknowledgement on admission, barge-in, and
+the loop guard on mixed audio — the transcriber is muted while the agent speaks and caption
+rows attributed to the agent's own display name are dropped. The voice-mode prompt hint turns
+on. Phase 0's TTS seam is the prerequisite.
 
-A webchat conversation has one human owner, so this is the issue's first ask done live,
-not a group room; several humans in one console room is a later extension of the
-multi-agent roster.
+### 6.4 Phase 3 — Discord voice channels and the console
 
-### 6.4 Phase 3 — external meetings
+- **Discord**, the one native driver. `@discordjs/voice` with `@snazzah/davey`; the
+  `GuildVoiceStates` intent; `CONNECT` and `SPEAK` in both copies of the invite permissions;
+  pure-JS/WASM Opus and encryption with any native speedup kept external, absent on platforms
+  that cannot load it, and skipped by the Windows unit suites. One decoded PCM stream per
+  speaker with bot speakers dropped at the source, Opus playback with cancel, and a
+  `/voice join|leave` slash command beside the existing command chrome. The voice host, the
+  spoken surface, and the prompt hint are phase 1 and 2 work reused unchanged. Behind a
+  `voice.discord` flag until the receive path has run in production for a release (§3.1).
+- **Webchat**, one human in the console. Audio cannot ride the webchat socket (§4). The
+  recommended shape is a media leg beside it: the browser sends 20 ms Opus frames over a
+  second WebSocket at the relay, authenticated with the same conversation token, which the
+  relay forwards to the owning daemon over a capability-gated binary `rd/*` stream, and
+  playback returns the same way; the daemon runs the same voice host with a `webchat` room
+  driver, the relay persists nothing, and the Control Plane carries nothing. The fallback is
+  browser-side recognition and synthesis sending ordinary `turn` and `steer: true` frames —
+  zero server audio, uneven quality and privacy, worth shipping as the no-provider mode. A
+  webchat conversation has one human owner, so this is the issue's first ask done live, not
+  a group room.
 
-The `MeetingBotProvider` seam (§5.5) with one hosted and one self-hosted implementer,
-Meet and Zoom first because both providers cover them, Teams through the same providers,
-Slack huddles only where an organization brings its own signed-in runner. Join from chat;
-calendar-driven joins on the trigger seam later.
+### 6.5 Phase 4 — Zoom, Teams, and huddles
 
-### 6.5 Sequencing and dependencies
+Through the runner seam (§5.5): Zoom and Teams via the first-party runner's browser path or an
+adopted runner; Zoom's native SDK never in the daemon; Slack huddles only with a runner the
+organization brings and a signed-in seat it accepts the terms of (§3.2). Calendar-driven
+joins from phase 1b extend to these platforms' invites.
+
+### 6.6 Sequencing and dependencies
 
 ```
-phase 0 voice notes ──► phase 1 Discord room ──► phase 2 webchat room
-  (speech providers)       (voice host)            (media leg)
-                                 └──────────────► phase 3 meeting providers
+phase 0 voice notes (speech providers) ─────────────┐
+phase 1 Meet join + transcribe (runner, voice host) ─┴─► phase 2 Meet addressed + speaking
+                                     │                          └─► phase 3 Discord + console
+                                     └─► phase 4 Zoom / Teams / huddles (same runner)
 ```
 
-Phase 0 ships alone. Phase 1 needs phase 0's seam and builds the host; phases 2 and 3 are
-new drivers on that host and can proceed in either order.
+Phases 0 and 1 are independent and run in parallel; phase 2 needs both; phases 3 and 4 need
+only the voice host and the runner.
 
-### 6.6 Deliberately not done
+### 6.7 Deliberately not done
 
-- **No browser automation in the daemon**, for huddles or any meeting product (§3.2, §5.5).
+- **No browser automation in the daemon.** It lives in the runner, a separate process the
+  daemon dials (§5.5), for Meet and every other meeting product.
+- **No Meet Media API** until it leaves developer preview (§3.3); the runner contract is the
+  seam it will replace.
 - **No recordings** and no audio persistence anywhere (§5.3).
 - **No speech-to-speech model in place of the agent.** A fast voice model that answers
   without running the ACP turn is a different product; the agent's value is the work it
-  does, and a fast "ack" is all the room needs (§2.3).
+  does, and a fast acknowledgement is all the room needs (§2.3).
 - **No Telegram group calls** and **no Feishu meetings** until an official bot route exists.
 - **No manifest field.** Room support is a host-contract facet; nothing reads it before
   dispatch.
 
 ## 7. Open questions to verify before implementation
 
-1. Discord's receive path under DAVE in `@discordjs/voice` 0.19+: stability across the
-   session-downgrade cases the PR handles, and whether Discord's developer terms say
-   anything about bots consuming voice.
-2. Whether pool pods may open UDP to Discord's voice servers, and what the sandbox
-   NetworkPolicy needs ([k8s-daemon-pool.md](k8s-daemon-pool.md) D3 covers only the shim).
-3. Whether a WASM DAVE and Opus stack keeps up with a busy room on the daemon's CPU
-   budget, or native acceleration must be the documented default for voice-enabled daemons.
-4. Feishu / Lark: an official real-time media or participant API, if one exists for
+1. Meet's caption DOM: which selectors hold (the captions region by role and aria label, or
+   obfuscated class names), how often Meet changes them, and the coalescing rule for a caption
+   rewritten in place.
+2. The agent's Google account: whether Workspace administrators will create a dedicated user
+   per agent or one per organization shared by its agents, the 2-step-verification policy for
+   it, and how the runner re-authenticates a persisted profile Google signs out.
+3. Whether Google's bot screening (§3.3) extends to signed-in Workspace participants that
+   behave like bots — no camera, no microphone — or only to guests, as the March 2026 change
+   states.
+4. Meet REST transcripts: which Workspace editions the organization's tenants have, and
+   whether an Events subscription held by the agent's account covers every meeting it is
+   invited to.
+5. The pool: a runner pod per meeting under the sandbox namespace's NetworkPolicy — Meet needs
+   WebRTC (UDP) egress the sandbox may not allow today, and the same question applies to a
+   native Discord driver in a daemon pod ([k8s-daemon-pool.md](k8s-daemon-pool.md) D3 covers
+   only the shim).
+6. Vexa as an adopted runner: which account its bot joins with, and whether its polling
+   transcript API is acceptable until its WebSocket stream ships.
+7. Discord's receive path under DAVE in `@discordjs/voice` 0.19+, and whether Discord's
+   developer terms say anything about bots consuming voice.
+8. Whether a WASM DAVE and Opus stack keeps up with a busy room on the daemon's CPU budget.
+9. Feishu / Lark: an official real-time media or participant API, if one exists for
    enterprise plans.
-5. Which self-hosted meeting-bot runner supports audio output today, and under what
-   licence.
-6. Speech-provider cost per meeting hour at streaming STT rates, and whether the Cloud
-   deployment funds it through the same credit path as Decisions.
-7. Whether `claude-agent-acp` or `codex-acp` plan to advertise `promptCapabilities.audio`.
-8. Consent requirements for automatic transcription in the jurisdictions Cloud serves,
-   beyond the announce-on-join default.
+10. Speech-provider cost per meeting hour at streaming STT rates for the audio path, and
+    whether the Cloud deployment funds it through the same credit path as Decisions.
+11. Whether `claude-agent-acp` or `codex-acp` plan to advertise `promptCapabilities.audio`.
+12. Consent requirements for automatic transcription in the jurisdictions Cloud serves, beyond
+    the announce-on-join default.
 
 ## 8. Risks
 
-- **Undocumented receive on Discord** (§3.1). Mitigation: the feature flag, a health probe
-  that detects silent decryption failure, and a fallback to `listen`-less presence (speak
-  only) if receive breaks in a Discord change.
+- **Meet's DOM moves.** A Meet release can break caption reading overnight. Mitigation:
+  selectors as versioned runner data, a canary meeting in CI against the live product, the
+  audio path as the fallback source, and the official transcript as the record of last resort.
+- **Google tightens admission.** The March 2026 change flagged guest bots; a later one could
+  reach signed-in participants. Mitigation: the Workspace account on the invite, the REST
+  transcript route that needs no participant, and a console status that says when a join was
+  denied and why.
+- **Account lockouts.** A dedicated Google account that signs in from a container is exactly
+  what Google's abuse systems watch. Mitigation: one persisted profile, a stable egress
+  address, and a re-authentication flow the operator can complete from the console.
+- **Undocumented receive on Discord** (§3.1). Mitigation: the feature flag and a health probe
+  that detects silent decryption failure.
 - **Speech recognition mangling names** makes `addressed` mode miss or over-trigger.
   Mitigation: aliases, the Decision fallback, and the talk-back mode for one-on-one use.
-- **A room holds a socket open for hours.** Reconciliation, drain, and upgrade flows treat
-  it as a platform connection; an upgrade mid-meeting drops the agent from the call, which
-  the daemon must announce in the companion.
-- **Loops between agents** in one room (§2.3). Speaker identity on Discord makes this
-  cheap; provider labels are weaker, so a meeting room defaults to one agent.
-- **Provider dependence.** Every phase needs a third-party speech model; an organization
-  without a configured provider gets phase 0's Slack transcripts and phase 2's browser
-  fallback and nothing else. The console must say so plainly.
-- **Cost surprise.** Streaming STT for a room that nobody addresses is the same price as
-  one that is used. Rooms default to leaving after a configurable idle period.
+- **A room holds a socket open for hours.** Reconciliation, drain, and upgrade flows treat it
+  as a platform connection; an upgrade mid-meeting drops the agent from the call, which the
+  daemon must announce in the companion.
+- **Loops between agents** in one room (§2.3). Speaker identity on Discord makes this cheap;
+  caption speaker names are weaker, so a meeting room defaults to one agent.
+- **Provider dependence** for the audio path and for speaking. Captions and the official
+  transcript keep phase 1 provider-free; the console must say plainly what an organization
+  without a provider gets in later phases.
+- **Cost surprise.** Streaming STT for a room nobody addresses costs the same as one that is
+  used. Rooms default to leaving after a configurable idle period, and captions are preferred
+  where they exist.
 
 ## 9. Recommended sequencing
 
-1. Phase 0 now. It closes the first ask asynchronously on five platforms, is small, and
-   creates the provider seam every later phase needs.
-2. Phase 1 next, behind a flag, on the one platform whose API is open. It is the proof of
-   the room model — steering, addressing, and the spoken surface — on a transport the
-   daemon already owns.
-3. Phase 2 once the host is stable, because the console is where a one-on-one voice
-   conversation is most natural and where AgentConnect controls both ends.
-4. Phase 3 when a provider partner or a self-hosted runner is chosen; nothing in it changes
-   the host.
+1. Phase 1 first: Meet join and transcribe through the first-party runner, captions first and
+   audio behind a flag, with the meeting-ended activation as the visible result. The voice
+   host it builds is the room model every later phase reuses. Phase 0 runs in parallel — the
+   speech seam the audio path and phase 2 need, plus voice notes on five platforms.
+2. Phase 2 once the host is stable: speaking on Meet, which turns the note-taker into the
+   participant the issue asks for.
+3. Phase 3: the Discord native driver and the console microphone, both drivers on the same
+   host.
+4. Phase 4 when Zoom or Teams demand appears; nothing in it changes the host.
 
 ## 10. Sources
 
 - [Issue #2361](https://github.com/agentconnect-md/agentconnect/issues/2361)
+- Google Meet: [Meet Media API overview](https://developers.google.com/workspace/meet/media-api/guides/overview),
+  [concepts](https://developers.google.com/workspace/meet/media-api/guides/concepts),
+  [REST API transcripts](https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts),
+  [transcript entries](https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts.entries),
+  [Meet events overview](https://developers.google.com/workspace/meet/api/guides/events-overview),
+  [controlling meeting access](https://support.google.com/a/users/answer/11989526),
+  [Google Meet update to stop bots joining meetings](https://www.neowin.net/news/google-meet-gets-a-new-update-to-stop-bots-from-joining-meetings/),
+  [Recall.ai Google Meet FAQ](https://docs.recall.ai/docs/google-meet-faq),
+  [Recall.ai Google Meet bot](https://github.com/recallai/google-meet-meeting-bot),
+  [caption capture from Meet's DOM](https://github.com/vincelamm/gMeetTranscriptCapture),
+  [OpenClaw caption coalescing](https://github.com/openclaw/openclaw/pull/150638)
+- Meeting-bot runners: [Vexa](https://github.com/Vexa-ai/vexa),
+  [Recall.ai meeting-bot](https://github.com/recallai/meeting-bot),
+  [Attendee](https://github.com/attendee-labs/attendee),
+  [ScreenApp meeting-bot](https://github.com/screenappai/meeting-bot),
+  [Meeting BaaS speaking bots](https://www.meetingbaas.com/en/api/speaking-bots-api)
 - Discord: [End-to-End Encryption for Audio and Video](https://support.discord.com/hc/en-us/articles/25968222946071-End-to-End-Encryption-for-Audio-and-Video),
   [DAVE protocol](https://daveprotocol.com/),
   [discord.js DAVE support PR](https://github.com/discordjs/discord.js/pull/10921) and
@@ -621,17 +734,12 @@ new drivers on that host and can proceed in either order.
 - Slack: [Recall.ai on Slack huddles](https://www.recall.ai/product/slack-huddles-api),
   [OpenClaw huddle plugin PR](https://github.com/openclaw/openclaw/pull/159879),
   [claw-huddle](https://github.com/jlgrimes/claw-huddle),
-  [Record audio and video clips in Slack](https://slack.com/help/articles/4406235165587-Record-audio-and-video-clips-in-Slack)
-- Google Meet: [Meet Media API overview](https://developers.google.com/workspace/meet/media-api/guides/overview),
-  [concepts](https://developers.google.com/workspace/meet/media-api/guides/concepts)
+  [Record audio and video clips in Slack](https://slack.com/help/articles/4406235165587-Record-audio-and-video-clips-in-Slack),
+  [Use AI to take huddle notes](https://slack.com/help/articles/31377193680019-Use-AI-to-take-huddle-notes-in-Slack)
 - Zoom: [Realtime Media Streams](https://developers.zoom.us/docs/rtms/),
   [Meeting SDK Linux raw recording sample](https://github.com/zoom/meetingsdk-linux-raw-recording-sample)
 - Microsoft Teams: [Real-time media calls and meetings for bots](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/calls-and-meetings/real-time-media-concepts)
 - Telegram: [tgcalls](https://github.com/MarshalX/tgcalls)
 - Feishu: [Meeting solutions on the open platform](https://open.feishu.cn/solutions/detail/meetings?lang=zh-CN)
-- Meeting-bot providers: [Recall.ai meeting-bot](https://github.com/recallai/meeting-bot),
-  [Attendee](https://github.com/attendee-labs/attendee), [Vexa](https://vexa.ai/),
-  [ScreenApp meeting-bot](https://github.com/screenappai/meeting-bot),
-  [Meeting BaaS speaking bots](https://www.meetingbaas.com/en/api/speaking-bots-api)
 - Speech and Claude: [audio input feature request](https://github.com/anthropics/anthropic-sdk-python/issues/1198),
   [Claude Code voice dictation](https://code.claude.com/docs/en/voice-dictation)
