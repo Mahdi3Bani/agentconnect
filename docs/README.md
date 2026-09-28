@@ -44,6 +44,7 @@ the picture it draws.
 - [feishu-integration.md](designs/feishu-integration.md) — The Lark / Feishu integration, international and CN variants.
 - [qq-integration.md](designs/qq-integration.md) — Official QQ bot integration, attachment support, and shared group-context and approval dependencies.
 - **(draft)** [google-chat-integration.md](designs/google-chat-integration.md) — Proposed native Google Chat integration with HTTPS relay ingress, threaded replies, durable admission, and a Pub/Sub alternative.
+- **(draft)** [voice-meeting-participation.md](designs/voice-meeting-participation.md) — Agents in voice calls: voice notes on every platform, Discord voice channels and the console as rooms, and a provider seam for Google Meet, Zoom, Teams, and huddles.
 
 ### Webchat and console
 
