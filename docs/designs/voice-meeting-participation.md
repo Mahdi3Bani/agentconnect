@@ -387,9 +387,22 @@ turns coming and going.
   companion: "<agent> has joined and is transcribing". On by default, per-organization
   switch. Many jurisdictions require notice before transcription, and the notice is also how
   humans learn the agent is listening.
-- **Audience.** The session's audience is the room's participants
-  ([session-visibility.md](session-visibility.md)), resolved through the platform's identity
-  where the transport gives one and left as display names from a meeting provider.
+- **Visibility is enforceable or private.** A room session classifies under
+  [session-visibility.md](session-visibility.md) §4.2 like any other session, and a runner's
+  participant display names never authorize a Console reader. A native Discord room takes
+  Discord's existing rules (a DM private to its initiator, a guild channel the org default).
+  A meeting room (§5.5) is `private` with `ownerIdentity` set to the human who invoked
+  `joinMeeting`, carried from the requesting session's trusted trigger identity — `user:<id>`
+  from webchat, `slack:<team>:<uid>` from a Slack thread; it is not an agent-to-agent child of
+  that session and inherits nothing from its audience. A join with no human requester is
+  `private` with a null owner — visible to no one, the fail-closed rule of §4.2 — until a
+  Google binding exists: `external` with provider `google-meet`, the conference record as the
+  immutable scope, and membership resolved by comparing the viewer's linked Google identity
+  (§7 of session-visibility.md, fed by the console's Google sign-in) with the participants the
+  agent's account can list through the REST API. That binding is the prerequisite of the
+  calendar-driven join (§6.2). The companion thread receives only what the agent posts there,
+  under that thread's own audience, and the voice-mode prompt says the transcript's audience
+  is the requester alone, so the agent summarizes rather than pastes.
 
 ### 5.4 Spoken turn output
 
@@ -551,20 +564,24 @@ those are phase 2.
 2. **The voice host in core** (§5.2–§5.3): the Meet `VoiceRoomDriver`; caption coalescing
    into final utterances — Meet rewrites a caption in place while a speaker talks, so a row is
    written only when its text settles; one channel-record row per utterance with the `voice`
-   annotation; participants as the session audience; the announce-on-join line posted to the
-   meeting's chat, since nothing speaks yet.
+   annotation; the session `private` to the requester (§5.3); the announce-on-join line posted
+   to the meeting's chat, since nothing speaks yet.
 3. **Entry points**: the `joinMeeting`/`leaveMeeting` tools, injected where a runner is
    configured, so "@agent join https://meet.google.com/…" in Slack or the console works; the
-   requesting thread is the text companion and receives the joined, denied, and left notices.
-   A calendar-driven join — the Workspace Events `conference.v2.started` event for meetings
-   the agent's account is invited to, on the trigger seam — is phase 1b, not a blocker.
+   requesting human becomes the session owner, and the requesting thread is the text companion
+   that receives the joined, denied, and left notices. A calendar-driven join — the Workspace
+   Events `conference.v2.started` event for meetings the agent's account is invited to, on the
+   trigger seam — is phase 1b: it has no human requester to own the session, so it waits on
+   the Google identity binding of §5.3.
 4. **The result**: when the runner reports `ended`, the voice host activates the agent once
    with a meeting-ended prompt, so the agent posts what a meeting produces — a summary,
    decisions, action items, links to the work it was asked for — into the companion thread,
    and the whole transcript stays readable in the session view. Where the organization has
    Meet transcription, the official `transcript.v2.fileGenerated` event fetches Google's
-   transcript into the same record as the authoritative copy (§3.3), which also covers a
-   meeting the runner was not in.
+   transcript into the same record as the authoritative copy (§3.3). Google serves transcript
+   entries to a meeting-space owner or participant, so the agent's account can fetch them for
+   a meeting the runner joined or a space the account created; an invitation it never attended
+   yields the event without the artifact, and the record then holds only what the runner heard.
 5. **Console**: the organization's runner settings, a meetings row on the agent, and the
    speaker label and offset in the session transcript view.
 
@@ -649,21 +666,25 @@ only the voice host and the runner.
 4. Meet REST transcripts: which Workspace editions the organization's tenants have, and
    whether an Events subscription held by the agent's account covers every meeting it is
    invited to.
-5. The pool: a runner pod per meeting under the sandbox namespace's NetworkPolicy — Meet needs
+5. The Google binding (§5.3): whether the console's Google sign-in identity can join the
+   viewer's identity set the way a linked Slack account does, and whether
+   `conferenceRecords.participants` returns an account id a viewer's identity can be matched
+   against, not only a display name.
+6. The pool: a runner pod per meeting under the sandbox namespace's NetworkPolicy — Meet needs
    WebRTC (UDP) egress the sandbox may not allow today, and the same question applies to a
    native Discord driver in a daemon pod ([k8s-daemon-pool.md](k8s-daemon-pool.md) D3 covers
    only the shim).
-6. Vexa as an adopted runner: which account its bot joins with, and whether its polling
+7. Vexa as an adopted runner: which account its bot joins with, and whether its polling
    transcript API is acceptable until its WebSocket stream ships.
-7. Discord's receive path under DAVE in `@discordjs/voice` 0.19+, and whether Discord's
+8. Discord's receive path under DAVE in `@discordjs/voice` 0.19+, and whether Discord's
    developer terms say anything about bots consuming voice.
-8. Whether a WASM DAVE and Opus stack keeps up with a busy room on the daemon's CPU budget.
-9. Feishu / Lark: an official real-time media or participant API, if one exists for
-   enterprise plans.
-10. Speech-provider cost per meeting hour at streaming STT rates for the audio path, and
+9. Whether a WASM DAVE and Opus stack keeps up with a busy room on the daemon's CPU budget.
+10. Feishu / Lark: an official real-time media or participant API, if one exists for
+    enterprise plans.
+11. Speech-provider cost per meeting hour at streaming STT rates for the audio path, and
     whether the Cloud deployment funds it through the same credit path as Decisions.
-11. Whether `claude-agent-acp` or `codex-acp` plan to advertise `promptCapabilities.audio`.
-12. Consent requirements for automatic transcription in the jurisdictions Cloud serves, beyond
+12. Whether `claude-agent-acp` or `codex-acp` plan to advertise `promptCapabilities.audio`.
+13. Consent requirements for automatic transcription in the jurisdictions Cloud serves, beyond
     the announce-on-join default.
 
 ## 8. Risks
