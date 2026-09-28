@@ -439,11 +439,43 @@ rest.
    setting chooses **everywhere** or **direct messages only**, because record-first means an
    observed shared channel transcribes every note whether or not one is admitted. Bytes are
    fetched through the platform read port under the existing attachment cap and a duration
-   cap. A relay-forwarded platform transcribes on the daemon too — the relay persists nothing
-   and calls no provider. When there is no provider, the download fails, or the cap is
-   exceeded, the note is recorded as it is today: an attachment the agent can open, never a
-   spoken mention. A runtime that advertises `audio` also gets the ACP `audio` block
-   (`attachment-block.ts`), which is the one line that changes there.
+   cap. When there is no provider, the download fails, or the cap is exceeded, the note is
+   recorded as it is today: an attachment the agent can open, never a spoken mention. A
+   runtime that advertises `audio` also gets the ACP `audio` block (`attachment-block.ts`),
+   which is the one line that changes there.
+
+   **Relay-forwarded shared bots take the host route.** The slot above is Case A of
+   [message-intake.md](message-intake.md) §5, daemon-owned ingress. A shared Slack or Feishu
+   bot is Case B (§6): the relay arbitrates the target from the wire message — channel
+   ownership, thread continuity, the agent-slug keyword, the channel default, the bot default
+   (`packages/relay/src/bot-arbitration.ts`) — before any daemon sees it, and `handleRelayIm`
+   (`daemon.ts:9623-9676`) records and routes the pre-addressed copy without passing through
+   `onInboundOutcome`. The relay persists nothing and calls no provider, so it cannot
+   transcribe, and a voice-only note has no text for the slug or a Decision to read: agent B's
+   spoken name would land on default agent A or nowhere. Phase 0 therefore gives a voice-only
+   note the one-copy-to-a-host mechanism Case B already has for By decision routing:
+
+   - The relay recognizes it from the wire alone — empty `text` and one `audio/*` attachment,
+     a content-free pre-dispatch read — and forwards its single copy to the conversation's
+     **transcription host** with a routing disposition, exactly as a By decision message goes
+     to its evaluation host.
+   - The host is the projected `evaluationDaemonId` where the conversation has one; otherwise
+     the same Control Plane rule computes it for voice (the bot's default agent's daemon, else
+     the earliest-created daemon among the candidate agents' daemons), restricted to daemons
+     that advertised `voice-note-stt-v1` in `rd/hello` and hold an STT provider, and projected
+     as a second field on `rc/bot-assign`.
+   - The host downloads the bytes with the bot credential it already holds for reads,
+     transcribes, records the row with the transcript as its text, runs Case A steps 2–4 on
+     that text — the slug, the mention, and a bound Decision all see the spoken words — and
+     distributes the frozen set: local targets admit directly, remote targets travel as
+     `rd/route` with the transcript in `payload.text`, so no target transcribes twice. This is
+     `hostRoutedIm` (`daemon.ts:19515`) with a transcription step ahead of its ladder, not a
+     second distribution path.
+   - **Where no host is eligible** — no daemon on the bot advertises the capability or holds a
+     provider — the note takes today's path: the relay's arbitration on empty text selects the
+     channel or bot default agent, whose daemon transcribes at its own intake for the prompt,
+     and a spoken name cannot select another agent. That is the narrowed promise for relay
+     platforms, and the bot's settings page says which of the two a bot has.
 
 3. Spoken replies: when a turn was started by a voice note and the agent's TTS is
    configured, the final reply is also synthesized and sent through the platform's
@@ -451,8 +483,9 @@ rest.
    Discord voice message, Slack audio file). This reuses the outbound byte path of
    [agent-authored-attachments.md](agent-authored-attachments.md) and needs no new surface.
 
-Cost: normalizers, one intake-ladder step, and one attachment-path change, a provider seam
-with one implementer, and a Provider keys entry. No new connection, no codec, no packaging change.
+Cost: normalizers, one intake-ladder step, the host route's transcription step and its
+`rc/bot-assign` projection, one attachment-path change, a provider seam with one implementer,
+and a Provider keys entry. No new connection, no codec, no packaging change.
 
 ### 6.2 Phase 1 — Discord voice channels (the first room)
 
