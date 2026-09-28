@@ -471,11 +471,15 @@ rest.
      `rd/route` with the transcript in `payload.text`, so no target transcribes twice. This is
      `hostRoutedIm` (`daemon.ts:19515`) with a transcription step ahead of its ladder, not a
      second distribution path.
-   - **Where no host is eligible** — no daemon on the bot advertises the capability or holds a
-     provider — the note takes today's path: the relay's arbitration on empty text selects the
-     channel or bot default agent, whose daemon transcribes at its own intake for the prompt,
-     and a spoken name cannot select another agent. That is the narrowed promise for relay
-     platforms, and the bot's settings page says which of the two a bot has.
+   - **Where the host route is unavailable** — no daemon on the bot advertises the capability,
+     or the relay or Control Plane predates the projection — but some agent on the bot holds a
+     provider, the note takes today's path: the relay's arbitration on empty text selects the
+     channel or bot default agent, whose daemon transcribes at its own intake (the Case A slot)
+     for its own prompt, and a spoken name cannot select another agent. That is the narrowed
+     promise for relay platforms, and the bot's settings page says which of these a bot has.
+   - **Where no agent on the bot holds a provider**, nothing transcribes anywhere: the same
+     arbitration picks the default agent, and its daemon keeps the note as an attachment under
+     the no-provider rule above.
 
 3. Spoken replies: when a turn was started by a voice note and the agent's TTS is
    configured, the final reply is also synthesized and sent through the platform's
