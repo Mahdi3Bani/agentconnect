@@ -24,7 +24,7 @@
     "lint:fix": "eslint . --fix",
     "prepare": "sh ./scripts/setup-hooks.sh",
     "test": "pnpm -r test",
-    "test:unit": "pnpm -r test:unit && node --test scripts/*.test.mjs",
+    "test:unit": "pnpm -r --no-sort test:unit && node --test scripts/*.test.mjs",
     "typecheck": "pnpm -r typecheck",
     "typecheck:ci": "pnpm --filter '!@agentconnect.md/web' --config.enable-pre-post-scripts=false -r typecheck"
   },
