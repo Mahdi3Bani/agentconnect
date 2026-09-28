@@ -391,10 +391,22 @@ turns coming and going.
   [session-visibility.md](session-visibility.md) §4.2 like any other session, and a runner's
   participant display names never authorize a Console reader. A native Discord room takes
   Discord's existing rules (a DM private to its initiator, a guild channel the org default).
-  A meeting room (§5.5) is `private` with `ownerIdentity` set to the human who invoked
-  `joinMeeting`, carried from the requesting session's trusted trigger identity — `user:<id>`
-  from webchat, `slack:<team>:<uid>` from a Slack thread; it is not an agent-to-agent child of
-  that session and inherits nothing from its audience. A join with no human requester is
+  A meeting room (§5.5) is `private` with `ownerIdentity` set to the **active turn's trusted
+  human invoker**: the sender of the latest human message the live turn has taken in — the
+  message that started it, or the most recent one steered into it — at the moment the
+  `joinMeeting` call runs. The tool host reads it from the pending turn the way a posting
+  tool reads `deliveryThreadNow()` (`packages/daemon/src/mcp/ops/context.ts`), never from
+  `SessionContext`, which is captured once at `session/new`, and never from the session's
+  `triggeredBy`, which is first-wins ([channel-session-mode.md](channel-session-mode.md) §9)
+  and in an `append` conversation names whoever opened the long-lived session, not who is
+  asking now. The identity takes session-visibility.md's §2 form: `<platform>:<transportScope>:<senderId>`
+  for a platform message (`slack:<team>:<uid>`), and for webchat `user:<userId>` from the
+  `turn` frame's verified `userId` — the Control Plane principal — not the display handle or
+  the email the session's trigger stores. A turn with no such human — automation, a hook, a
+  cron, an agent-to-agent wake, a webchat frame from a relay too old to carry `userId` —
+  has no invoker, and the tool refuses the join with that reason rather than opening a
+  session someone else would own. The meeting session is not an agent-to-agent child of the
+  requesting session and inherits nothing from its audience. A join with no human requester is
   `private` with a null owner — visible to no one, the fail-closed rule of §4.2 — until a
   Google binding exists: `external` with provider `google-meet`, the conference record as the
   immutable scope, and membership resolved by comparing the viewer's linked Google identity
@@ -568,8 +580,9 @@ those are phase 2.
    to the meeting's chat, since nothing speaks yet.
 3. **Entry points**: the `joinMeeting`/`leaveMeeting` tools, injected where a runner is
    configured, so "@agent join https://meet.google.com/…" in Slack or the console works; the
-   requesting human becomes the session owner, and the requesting thread is the text companion
-   that receives the joined, denied, and left notices. A calendar-driven join — the Workspace
+   active turn's trusted human invoker (§5.3) becomes the session owner, a turn without one is
+   refused, and the requesting thread is the text companion that receives the joined, denied,
+   and left notices. A calendar-driven join — the Workspace
    Events `conference.v2.started` event for meetings the agent's account is invited to, on the
    trigger seam — is phase 1b: it has no human requester to own the session, so it waits on
    the Google identity binding of §5.3.
