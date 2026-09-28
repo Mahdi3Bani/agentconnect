@@ -175,9 +175,14 @@ tricked into the wrong huddle. AgentConnect should not ship it as a first-party 
 organization that wants it can point the provider seam (§5.5) at a runner of its own.
 
 Slack's own transcript products are the better fit. An **audio clip** posted in a channel
-is a file whose object carries Slack's transcription when the workspace has it, so phase 0
-gets Slack voice notes with no speech provider at all; a **huddle** leaves Slack's summary
-and transcript in the huddle thread, which the ordinary Slack module already reads.
+is a file whose object carries Slack's transcription once Slack has produced one, so phase 0
+gets Slack voice notes with no speech provider at all. A **huddle** with AI notes leaves a
+notes canvas in the huddle thread with the transcript embedded in it; today the Slack
+normalizer reduces that canvas to a file link (`packages/message/src/slack-message.ts:139-155`)
+and nothing reads its contents automatically, but the agent can open it on request through
+the Slack canvas read port (`packages/daemon/src/platforms/read-ports.ts:168`). Reading
+huddle notes into the channel record automatically is a phase-0 follow-up on that port, not
+new transport.
 
 ### 3.3 Google Meet
 
@@ -413,20 +418,41 @@ rest.
    and `video_note`; Feishu maps its audio type; Discord reads the voice-message flag;
    Slack keeps the file and reads its `transcription` object when present; QQ keeps its
    `audio/wav`.
-2. The speech-provider seam (§5.1), STT first. At prompt build, a voice attachment is
-   transcribed and the message text becomes the transcript (prefixed so the agent knows it
-   was spoken), with the original file still attached and materialized through the
-   landing zone of [inbound-file-attachments.md](inbound-file-attachments.md) §2 once that
-   ships. A runtime that advertises `audio` also gets the ACP `audio` block
+2. The speech-provider seam (§5.1), STT first, **run at intake, above the channel record.**
+   The intake ladder records first and routes second ([message-intake.md](message-intake.md)
+   §5): the channel-record row is written in `onInboundOutcome`
+   (`packages/daemon/src/daemon.ts:8906-8927`) before the addressing ladder and the By decision
+   gate ever see the message, and both judge the row's text. A voice note transcribed only at
+   prompt build would therefore be recorded as an empty message with an opaque attachment,
+   could not be admitted by the name it speaks in a shared channel, and could not be judged on
+   its words. Transcription is instead a normalization step in the slot Telegram thread
+   canonicalization occupies today (`daemon.ts:8916-8919`): it has no store writes, and it
+   produces the text step 1 records. The row's text is the transcript, marked as spoken and
+   carrying the `voice` annotation of §5.3, with the original file still attached and
+   materialized through the landing zone of
+   [inbound-file-attachments.md](inbound-file-attachments.md) §2 once that ships. Everything
+   downstream — the ladder, the Decision, admission, steering, the prompt — then treats a
+   voice note exactly like a typed message.
+
+   Conditions, so the step costs nothing where it cannot matter: it runs only when an agent
+   the message can reach on this connection has an STT provider configured, and a per-agent
+   setting chooses **everywhere** or **direct messages only**, because record-first means an
+   observed shared channel transcribes every note whether or not one is admitted. Bytes are
+   fetched through the platform read port under the existing attachment cap and a duration
+   cap. A relay-forwarded platform transcribes on the daemon too — the relay persists nothing
+   and calls no provider. When there is no provider, the download fails, or the cap is
+   exceeded, the note is recorded as it is today: an attachment the agent can open, never a
+   spoken mention. A runtime that advertises `audio` also gets the ACP `audio` block
    (`attachment-block.ts`), which is the one line that changes there.
+
 3. Spoken replies: when a turn was started by a voice note and the agent's TTS is
    configured, the final reply is also synthesized and sent through the platform's
    `uploadFile` path as a voice note where the platform has one (Telegram `sendVoice`,
    Discord voice message, Slack audio file). This reuses the outbound byte path of
    [agent-authored-attachments.md](agent-authored-attachments.md) and needs no new surface.
 
-Cost: normalizers and one attachment-path change, a provider seam with one implementer,
-and a Provider keys entry. No new connection, no codec, no packaging change.
+Cost: normalizers, one intake-ladder step, and one attachment-path change, a provider seam
+with one implementer, and a Provider keys entry. No new connection, no codec, no packaging change.
 
 ### 6.2 Phase 1 — Discord voice channels (the first room)
 
