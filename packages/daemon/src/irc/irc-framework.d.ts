@@ -31,8 +31,20 @@ declare module 'irc-framework' {
     account?: string
   }
 
+  /** A `privmsg` or `action` event; tag values are unescaped, and a valueless tag is ''. */
+  export interface MessageEvent {
+    from_server: boolean
+    nick: string
+    ident?: string
+    hostname?: string
+    target: string
+    message: string
+    tags?: Record<string, string>
+  }
+
   export class Client {
     network?: NetworkInfo
+    user?: { nick: string; username: string; host: string }
     connect(options: ConnectOptions): void
     quit(message?: string): void
     raw(line: string): void

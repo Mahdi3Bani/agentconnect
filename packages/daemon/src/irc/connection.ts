@@ -1,4 +1,8 @@
-import IRC, { type Client as IrcClient } from 'irc-framework'
+import { randomUUID } from 'node:crypto'
+import { ircCaseFold, normalizeIrcMessage, type IrcMessageEvent } from '@agentconnect.md/message'
+import IRC, { type Client as IrcClient, type MessageEvent as IrcFrameworkMessage } from 'irc-framework'
+import type { NormalizedMessage } from '../messages/normalized.js'
+import { PlatformSendQueue } from '../platforms/send-queue.js'
 import type {
   PlatformChannelInfo,
   PlatformChannelRef,
@@ -6,6 +10,8 @@ import type {
   PlatformMemberRef,
   PlatformUserProfile
 } from '../platforms/contract.js'
+import { IrcFloodGate } from './flood.js'
+import { ircPayloadBudget, splitIrcText } from './split.js'
 
 export interface IrcConnectionConfig {
   host: string
@@ -17,6 +23,21 @@ export interface IrcConnectionConfig {
   /** SASL PLAIN, where the network supports it. */
   account?: { username: string; password: string }
   serverPassword?: string
+}
+
+export interface IrcConnectionDeps {
+  onMessage?(msg: NormalizedMessage): void
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  /** How long a send waits for its echo-message before reporting it unconfirmed. */
+  echoTimeoutMs?: number
+}
+
+/** One PRIVMSG line as sent. `confirmed` means the server echoed it back; `id` is its msgid when tags were granted. */
+export interface IrcSendReceipt {
+  id: string
+  text: string
+  confirmed: boolean
 }
 
 /**
@@ -38,6 +59,9 @@ const WANTED_CAPS = [
   'extended-join'
 ] as const
 
+// Settled with the echo (msgid present only where message-tags were granted), or null on timeout or stop.
+type EchoWaiter = (receipt: { msgid?: string } | null) => void
+
 const DEFAULT_CHANNEL_PREFIXES = '#&'
 
 function timeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -52,10 +76,23 @@ export class IrcConnection implements PlatformConnection {
   private client: IrcClient
   private ready = false
   private negotiated = new Set<string>()
+  private readonly queue: PlatformSendQueue
+  private readonly flood: IrcFloodGate
+  private readonly now: () => number
+  private localSeq = 0
+  // Sends awaiting their echo, FIFO per (target, text): the server echoes in the order it received them.
+  private readonly awaitingEcho = new Map<string, EchoWaiter[]>()
 
-  constructor(private readonly config: IrcConnectionConfig) {
+  constructor(
+    private readonly config: IrcConnectionConfig,
+    private readonly deps: IrcConnectionDeps = {}
+  ) {
     this.botUserId = config.nick
     this.client = new IRC.Client()
+    this.now = deps.now ?? (() => Date.now())
+    this.flood = new IrcFloodGate(undefined, undefined, this.now, deps.sleep)
+    // The flood gate does the spacing; the queue contributes FIFO order and the per-task timeout.
+    this.queue = new PlatformSendQueue(0, this.now, deps.sleep)
   }
 
   // ── 1. transport lifecycle ──
@@ -63,12 +100,13 @@ export class IrcConnection implements PlatformConnection {
   async start(): Promise<void> {
     await timeout(
       new Promise<void>((resolve, reject) => {
-        // ISUPPORT (005) lands after 001, so nothing read here would be
-        // complete. Everything derived from it is a lazy getter instead.
         this.client.on('registered', () => {
           this.ready = true
-          resolve()
         })
+        // ISUPPORT (005) lands after 001 but before end-of-MOTD (376, or 422 without one), so resolving there means it is read.
+        this.client.on('motd', () => resolve())
+        this.client.on('privmsg', (event: IrcFrameworkMessage) => this.onInbound('privmsg', event))
+        this.client.on('action', (event: IrcFrameworkMessage) => this.onInbound('action', event))
         this.client.on('socket close', () => {
           if (!this.ready) reject(new Error('connection closed before registration'))
         })
@@ -101,6 +139,8 @@ export class IrcConnection implements PlatformConnection {
 
   async stop(): Promise<void> {
     this.ready = false
+    for (const waiters of this.awaitingEcho.values()) for (const settle of waiters) settle(null)
+    this.awaitingEcho.clear()
     this.client.quit('disconnecting')
   }
 
@@ -120,6 +160,96 @@ export class IrcConnection implements PlatformConnection {
 
   get network(): string | undefined {
     return (this.client.network?.supports?.('NETWORK') as string | undefined) || undefined
+  }
+
+  /** The nick the server knows us by now, which a collision at registration may have changed. */
+  private get nick(): string {
+    return this.client.user?.nick || this.config.nick
+  }
+
+  private get casemapping(): string {
+    const value = this.client.network?.supports?.('CASEMAPPING')
+    return typeof value === 'string' && value ? value : 'rfc1459'
+  }
+
+  private echoKey(target: string, text: string): string {
+    return `${ircCaseFold(target, this.casemapping)}\n${text}`
+  }
+
+  private mintLocalId(): string {
+    return `local-${this.now()}-${++this.localSeq}`
+  }
+
+  // ── inbound ──
+
+  private onInbound(kind: IrcMessageEvent['kind'], event: IrcFrameworkMessage): void {
+    if (event.from_server || !event.nick) return
+    const tags = event.tags ?? {}
+    if (ircCaseFold(event.nick, this.casemapping) === ircCaseFold(this.nick, this.casemapping)) {
+      // Our own line coming back is a delivery receipt, never a conversation turn.
+      const text = kind === 'action' ? `\x01ACTION ${event.message}\x01` : event.message
+      const key = this.echoKey(event.target, text)
+      const waiters = this.awaitingEcho.get(key)
+      waiters?.shift()?.(tags.msgid ? { msgid: tags.msgid } : {})
+      if (waiters && !waiters.length) this.awaitingEcho.delete(key)
+      return
+    }
+    const msg = normalizeIrcMessage(
+      {
+        kind,
+        nick: event.nick,
+        target: event.target,
+        text: event.message,
+        tags,
+        fallbackId: this.mintLocalId(),
+        receivedAtMs: this.now()
+      },
+      randomUUID(),
+      {
+        botNick: this.nick,
+        chantypes: this.client.network?.supports?.('CHANTYPES') as string | string[] | undefined,
+        casemapping: this.casemapping
+      }
+    )
+    if (msg) this.deps.onMessage?.(msg)
+  }
+
+  // ── outbound ──
+
+  /** Split to fit the relayed 512-byte line, pace under flood control, and resolve once each line is echoed or times out. */
+  async sendText(target: string, text: string): Promise<IrcSendReceipt[]> {
+    // The target is interpolated into a raw line, so anything that could end or extend it is refused outright.
+    if (!/^[^\s,:\x00][^\s,\x00]*$/.test(target)) throw new Error(`invalid IRC target: ${JSON.stringify(target)}`)
+    const budget = ircPayloadBudget('PRIVMSG', target, {
+      nick: this.nick,
+      username: this.client.user?.username,
+      host: this.client.user?.host
+    })
+    const echo = this.negotiated.has('echo-message')
+    const receipts = splitIrcText(text, budget).map(async (line): Promise<IrcSendReceipt> => {
+      const key = this.echoKey(target, line)
+      let settle: EchoWaiter = () => {}
+      const echoed = new Promise<{ msgid?: string } | null>((resolve) => (settle = resolve))
+      await this.queue.enqueue(
+        async () => {
+          // Registered before the write so an echo cannot arrive ahead of its waiter.
+          if (echo) this.awaitingEcho.set(key, [...(this.awaitingEcho.get(key) ?? []), settle])
+          this.client.raw(`PRIVMSG ${target} :${line}`)
+        },
+        () => this.flood.take()
+      )
+      if (!echo) return { id: this.mintLocalId(), text: line, confirmed: false }
+      const timer = setTimeout(() => {
+        const waiters = this.awaitingEcho.get(key) ?? []
+        if (waiters.includes(settle)) waiters.splice(waiters.indexOf(settle), 1)
+        if (!waiters.length) this.awaitingEcho.delete(key)
+        settle(null)
+      }, this.deps.echoTimeoutMs ?? 10_000)
+      const receipt = await echoed
+      clearTimeout(timer)
+      return { id: receipt?.msgid ?? this.mintLocalId(), text: line, confirmed: receipt !== null }
+    })
+    return Promise.all(receipts)
   }
 
   /** CHANTYPES comes back as a string on some ircds and an array on others. */

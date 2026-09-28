@@ -13,6 +13,8 @@ export interface TestServerOptions {
   caps?: string[]
   members?: Record<string, string[]>
   channels?: { name: string; users: number; topic: string }[]
+  /** Accept echo-message but never echo, to exercise the unconfirmed path. */
+  withholdEcho?: boolean
 }
 
 export interface TestServer {
@@ -40,6 +42,8 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     let buffer = ''
     let negotiating = false
     let registered = false
+    const acked = new Set<string>()
+    let msgSeq = 0
 
     // A real server withholds 001 until CAP END. Sending it early ends
     // registration before the client has asked for anything, which is exactly
@@ -78,6 +82,7 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
                 .filter(Boolean)
               const granted = asked.filter((c) => caps.includes(c))
               const refused = asked.filter((c) => !caps.includes(c))
+              granted.forEach((c) => acked.add(c))
               if (granted.length) send(`:server CAP ${nick} ACK :${granted.join(' ')}`)
               if (refused.length) send(`:server CAP ${nick} NAK :${refused.join(' ')}`)
             }
@@ -119,6 +124,18 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
             const target = args[0]
             send(`:server 311 ${nick} ${target} ~user host * :Real Name Of ${target}`)
             send(`:server 318 ${nick} ${target} :End of /WHOIS list`)
+            break
+          }
+
+          case 'PRIVMSG': {
+            if (!acked.has('echo-message') || options.withholdEcho) break
+            const target = args[0] ?? ''
+            const text = line.slice(line.indexOf(' :') + 2)
+            const tags = [
+              ...(acked.has('message-tags') ? [`msgid=srv${++msgSeq}`] : []),
+              ...(acked.has('server-time') ? [`time=${new Date().toISOString()}`] : [])
+            ]
+            send(`${tags.length ? `@${tags.join(';')} ` : ''}:${nick}!u@h PRIVMSG ${target} :${text}`)
             break
           }
 
