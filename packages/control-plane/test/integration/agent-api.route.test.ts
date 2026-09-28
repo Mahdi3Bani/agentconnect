@@ -1,5 +1,5 @@
 // `/agents/:agentId/api` — the chat APIs an agent accepts calls on (shared-bot-relay.md §10.4).
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { API_DECISION_GATE_V1_FEATURE } from '@agentconnect.md/protocol'
 import { prisma } from '../setup.db.js'
 import { buildHttpApp } from '../fakes/build-http.js'
@@ -53,8 +53,10 @@ describe('agent chat APIs', () => {
     expect((await list(a)).json()).toEqual({ entries: [] })
     expect((await remove(a)).statusCode).toBe(404)
 
-    const audits = await prisma.auditEvent.findMany({ where: { kind: 'agent_api_change', agentId: AGENT } })
-    expect(audits.map((e) => (e.details as { enabled: boolean }).enabled).sort()).toEqual([false, true])
+    await vi.waitFor(async () => {
+      const audits = await prisma.auditEvent.findMany({ where: { kind: 'agent_api_change', agentId: AGENT } })
+      expect(audits.map((e) => (e.details as { enabled: boolean }).enabled).sort()).toEqual([false, true])
+    })
   })
 
   it('rejects an unknown protocol and an unknown agent', async () => {
