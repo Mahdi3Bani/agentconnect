@@ -47,7 +47,10 @@ describe('IRC installation', () => {
   it('projects a payload the daemon schema accepts, and the same login it was given', async () => {
     const provider = createIrcCpProvider()
     const install = provider.buildNewBotInstall({ credentials, identity: {}, transport: 'socket', shareable: false })
-    const config = ircIntegrationConfig({ platformConfig: install.bot!.platformConfig! }, install.secrets)
+    // Through what the repo persists, not the install's own bag: a live install once stored an empty bag here.
+    const persisted = provider.projectBotIdentity!({ platform: 'irc', ...install.bot } as never)
+    expect(persisted.externalAppId).toBe('irc://irc.example.net:6697/r2d2')
+    const config = ircIntegrationConfig({ platformConfig: persisted.platformConfig ?? null }, install.secrets)
     expect(IntegrationIrcConfig.parse(config)).toEqual(credentials)
   })
 

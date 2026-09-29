@@ -95,16 +95,19 @@ export function createIrcCpProvider(): CpPlatformProvider<IrcCreateCredentials> 
         conflictMessage: 'This nick on this IRC network is already installed. Reuse the existing bot.'
       }
     }),
-    projectBotIdentity: (input) => ({
-      externalAppId: input.platformConfig?.host
-        ? ircExternalAppId({
-            host: input.platformConfig.host,
-            port: Number(input.platformConfig.port ?? 6697),
-            nick: input.platformConfig.nick ?? input.botUserId ?? ''
-          })
-        : undefined,
-      externalTenantId: '-'
-    }),
+    // The repo persists only what this returns, so the login's bag must ride along with the identity.
+    projectBotIdentity: (input) =>
+      input.platformConfig?.host
+        ? {
+            externalAppId: ircExternalAppId({
+              host: input.platformConfig.host,
+              port: Number(input.platformConfig.port ?? 6697),
+              nick: input.platformConfig.nick ?? input.botUserId ?? ''
+            }),
+            externalTenantId: '-',
+            platformConfig: input.platformConfig
+          }
+        : { externalTenantId: '-' },
     secretShape: { slots: { botToken: 'IRC SASL password', appToken: 'IRC server password' }, httpAssignRequires: [] },
     async projectIntegrationConfig(_integration, bot, _core, secrets) {
       return ircIntegrationConfig(bot, secrets)
