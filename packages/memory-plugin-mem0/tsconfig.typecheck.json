@@ -6,6 +6,7 @@
     "noEmit": true,
     "rootDir": "../.."
   },
-  "include": ["src", "test", "vitest.config.ts"],
+  // The daemon sources its tests reach include an untyped dependency, declared beside its adapter.
+  "include": ["src", "test", "vitest.config.ts", "../daemon/src/platforms/irc/irc-framework.d.ts"],
   "exclude": []
 }

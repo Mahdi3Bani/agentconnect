@@ -19,6 +19,7 @@ import { describe, it, expect } from 'vitest'
 import type { Platform as ProtocolPlatform } from '@agentconnect.md/protocol'
 import { CP_PLATFORM_IDS } from './ids.js'
 import { buildCpPlatformRegistry } from './registry.js'
+import { createIrcCpProvider } from './irc/provider.js'
 import { createQQCpProvider } from './qq/provider.js'
 import { createTelegramCpProvider } from './telegram/provider.js'
 import { createDiscordCpProvider } from './discord/provider.js'
@@ -35,6 +36,7 @@ import { findTool } from '../http/mcp/tools.js'
  *  objects. */
 const productionRegistry = buildCpPlatformRegistry([
   createQQCpProvider(),
+  createIrcCpProvider(),
   createTelegramCpProvider({ verifyBot: async () => ({ status: 'unreachable' }) }),
   createDiscordCpProvider({ ensureMessageContentIntent: async () => 'ready' }),
   createSlackCpProvider({}),

@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   ircCaseFold,
   ircUserId,
+  isIrcChannel,
   normalizeIrcMessage,
   parseIrcUserId,
   type IrcMessageEvent
@@ -11,7 +12,9 @@ import IRC, {
   type ConnectOptions,
   type MessageEvent as IrcFrameworkMessage
 } from 'irc-framework'
+import type { LoadedAgent } from '../../agents/load-agents.js'
 import type { NormalizedMessage } from '../../messages/normalized.js'
+import { platformIntegrationConfig } from '../integration-config.js'
 import { PlatformSendQueue } from '../send-queue.js'
 import type {
   PlatformChannelInfo,
@@ -36,6 +39,36 @@ export interface IrcConnectionConfig {
   serverPassword?: string
   /** Channels to join, and rejoin after every reconnect. */
   channels?: string[]
+}
+
+/** One login on one network, and every integration it serves. */
+export interface IrcConnectionGroup {
+  config: IrcConnectionConfig
+  integrations: { agentId: string; integrationId: string }[]
+}
+
+/** Any change to the login, passwords and channels included, is a new connection. */
+export function ircConnKey(config: IrcConnectionConfig): string {
+  return createHash('sha256').update(JSON.stringify(config)).digest('hex')
+}
+
+export function consolidateIrc(agents: LoadedAgent[]): Map<string, IrcConnectionGroup> {
+  const groups = new Map<string, IrcConnectionGroup>()
+  for (const agent of agents)
+    for (const integration of agent.integrations) {
+      const wire = platformIntegrationConfig('irc', integration)
+      if (!wire) continue
+      const { saslAccount, saslPassword, ...rest } = wire
+      const config: IrcConnectionConfig = {
+        ...rest,
+        ...(saslAccount && saslPassword ? { account: { username: saslAccount, password: saslPassword } } : {})
+      }
+      const key = ircConnKey(config)
+      const group = groups.get(key) ?? { config, integrations: [] }
+      group.integrations.push({ agentId: agent.id, integrationId: integration.id })
+      groups.set(key, group)
+    }
+  return groups
 }
 
 export interface IrcConnectionDeps {
@@ -95,6 +128,8 @@ function timeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
 
 export class IrcConnection implements PlatformConnection {
   readonly botUserId: string
+  /** The pool identity: {@link ircConnKey} of the login this connection was opened with. */
+  readonly key: string
   private client: IrcClient
   // Set once start() succeeds; a close before that fails start() instead of reconnecting.
   private started = false
@@ -113,6 +148,8 @@ export class IrcConnection implements PlatformConnection {
   private localSeq = 0
   // Last nick seen per services account, so an `account:` id can still be WHOISed.
   private readonly nickByAccount = new Map<string, string>()
+  // Channels joined on an INVITE, rejoined after a reconnect for as long as this connection lives; capped against invite spam.
+  private readonly invitedChannels = new Set<string>()
   // Sends awaiting their echo, FIFO per (target, text): the server echoes in the order it received them.
   private readonly awaitingEcho = new Map<string, EchoWaiter[]>()
 
@@ -121,6 +158,7 @@ export class IrcConnection implements PlatformConnection {
     private readonly deps: IrcConnectionDeps = {}
   ) {
     this.botUserId = config.nick
+    this.key = ircConnKey(config)
     this.client = new IRC.Client()
     this.now = deps.now ?? (() => Date.now())
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms).unref?.()))
@@ -137,6 +175,7 @@ export class IrcConnection implements PlatformConnection {
     this.client.on('socket close', () => this.onSocketClose())
     this.client.on('privmsg', (event: IrcFrameworkMessage) => this.onInbound('privmsg', event))
     this.client.on('action', (event: IrcFrameworkMessage) => this.onInbound('action', event))
+    this.client.on('invite', (event: { nick: string; channel: string }) => void this.onInvite(event))
     const ready = new Promise<void>((resolve, reject) => {
       // ISUPPORT (005) lands after 001 but before end-of-MOTD (376, or 422 without one), so resolving there means it is read.
       this.client.on('motd', () => resolve())
@@ -185,8 +224,24 @@ export class IrcConnection implements PlatformConnection {
     void this.joinChannels()
   }
 
+  // Accepting an invite is how a bot is added to a channel on IRC; the configured list stays the durable one.
+  private async onInvite(event: { nick: string; channel: string }): Promise<void> {
+    const channel = event.channel
+    if (this.invitedChannels.has(channel) || this.invitedChannels.size >= 100) return
+    try {
+      assertIrcTarget(channel)
+    } catch {
+      return
+    }
+    if (!isIrcChannel(channel, this.client.network?.supports?.('CHANTYPES') as string | string[] | undefined)) return
+    this.invitedChannels.add(channel)
+    this.deps.log?.info(`irc: ${event.nick} invited us to ${channel}; joining`)
+    await this.flood.take()
+    if (this.registered) this.client.raw(`JOIN ${channel}`)
+  }
+
   private async joinChannels(): Promise<void> {
-    for (const channel of this.config.channels ?? []) {
+    for (const channel of new Set([...(this.config.channels ?? []), ...this.invitedChannels])) {
       try {
         assertIrcTarget(channel)
       } catch {
@@ -312,6 +367,7 @@ export class IrcConnection implements PlatformConnection {
       randomUUID(),
       {
         botNick: this.nick,
+        botId: this.botUserId,
         chantypes: this.client.network?.supports?.('CHANTYPES') as string | string[] | undefined,
         casemapping: this.casemapping
       }

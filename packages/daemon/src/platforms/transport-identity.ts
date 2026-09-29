@@ -33,6 +33,10 @@ function telegramBotId(botToken: string): string | undefined {
   return /^\d+$/.test(botId ?? '') ? botId : undefined
 }
 
+function ircNetwork(irc: { host: string; port: number }): string {
+  return `irc://${irc.host.toLowerCase()}:${irc.port}`
+}
+
 const CONNECTION_IDENTITY = new Map<string, (integration: Integration) => string | undefined>([
   ['qq', (int) => platformIntegrationConfig('qq', int)?.appId],
   // A shared bot has no app token to key on; a socket integration keys on it.
@@ -63,7 +67,15 @@ const CONNECTION_IDENTITY = new Map<string, (integration: Integration) => string
     }
   ],
   // The Chat app's project number, not its key: a rotated key must keep the installation's scope (google-chat-integration.md §3).
-  ['googlechat', (int) => platformIntegrationConfig('googlechat', int)?.projectNumber]
+  ['googlechat', (int) => platformIntegrationConfig('googlechat', int)?.projectNumber],
+  // The nick on its network, not the password: a rotated SASL password is the same bot.
+  [
+    'irc',
+    (int) => {
+      const irc = platformIntegrationConfig('irc', int)
+      return irc && `${ircNetwork(irc)}/${irc.nick.toLowerCase()}`
+    }
+  ]
 ])
 
 /** The credential string identifying `integration`'s physical connection —
@@ -113,6 +125,14 @@ const TENANT_SCOPE = new Map<string, (host: TenantScopeHost, integration: Integr
   [
     'googlechat',
     async (host, int) => platformIntegrationConfig('googlechat', int)?.projectNumber ?? (await host.minted(int.id))
+  ],
+  // An IRC network is the tenant: every bot on it sees the same channels and nicks.
+  [
+    'irc',
+    async (host, int) => {
+      const irc = platformIntegrationConfig('irc', int)
+      return irc ? ircNetwork(irc) : await host.minted(int.id)
+    }
   ]
 ])
 

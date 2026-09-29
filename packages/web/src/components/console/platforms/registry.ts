@@ -16,6 +16,7 @@ import { googleChatModule } from './googlechat'
 import { linearModule } from './linear'
 import { slackModule } from './slack'
 import { QQModule } from './qq'
+import { ircModule } from './irc'
 import { telegramModule } from './telegram'
 
 /**
@@ -37,7 +38,8 @@ const MODULES: readonly WebPlatformModule[] = [
   feishuModule,
   linearModule,
   QQModule,
-  googleChatModule
+  googleChatModule,
+  ircModule
 ]
 
 const BY_ID = new Map(MODULES.map((m) => [m.platformId, m]))

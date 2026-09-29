@@ -226,6 +226,16 @@ describe('staying connected', () => {
     expect(receipt!.confirmed).toBe(true)
   })
 
+  it('joins a channel it is invited to, keeps it across a reconnect, and ignores a non-channel', async () => {
+    await withChannels()
+    server!.push(':han!h@host INVITE agentconnect #hangar')
+    server!.push(':han!h@host INVITE agentconnect han')
+    await vi.waitFor(() => expect(server!.received).toContain('JOIN #hangar'))
+    server!.drop()
+    await vi.waitFor(() => expect(server!.received.filter((l) => l === 'JOIN #hangar')).toHaveLength(2))
+    expect(server!.received).not.toContain('JOIN han')
+  })
+
   it('fails a send while disconnected instead of dropping it silently', async () => {
     const warnings: string[] = []
     // A long backoff keeps it disconnected for the duration of the send.
@@ -247,9 +257,10 @@ describe('staying connected', () => {
     )
     await conn.start()
     expect(server.received).toContain('NICK agentconnect_')
-    // Mentions follow the nick the server actually gave us.
+    // A mention is spotted on the nick the server gave us, and reported as the identity routing binds.
     server.push(':han!h@host PRIVMSG #cantina :agentconnect_: hi')
-    await vi.waitFor(() => expect(seen[0]?.mentionedBots).toEqual(['agentconnect_']))
+    await vi.waitFor(() => expect(seen[0]?.mentionedBots).toEqual([conn!.botUserId]))
+    expect(conn.botUserId).toBe('agentconnect')
   })
 
   it('does not reconnect after stop', async () => {

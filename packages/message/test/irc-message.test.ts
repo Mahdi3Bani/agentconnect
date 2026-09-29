@@ -47,6 +47,16 @@ describe('IRC normalization', () => {
     expect(normalize({ text: 'agentconnectors are neat' })!.mentionedBots).toEqual([])
   })
 
+  it('reports a mention of a fallback nick as the stable bot id', () => {
+    const msg = normalizeIrcMessage({ ...event, text: 'agentconnect_: hi' }, 'trace', {
+      ...ctx,
+      botNick: 'agentconnect_',
+      botId: 'agentconnect'
+    })!
+    expect(msg.mentionedBots).toEqual(['agentconnect'])
+    expect(msg.text).toBe('hi')
+  })
+
   it('addresses a DM by the sender nick, since that is where the reply goes', () => {
     const msg = normalize({ target: 'agentconnect', text: 'hi' })!
     expect(msg).toMatchObject({ channel: 'han', thread: 'dm', isDm: true, msgId: 'irc:han:local-1' })

@@ -140,6 +140,8 @@ export const DEFAULT_MANIFEST: Omit<PlatformManifest, 'platform'> = {
  */
 const MANIFESTS = new Map<string, Omit<PlatformManifest, 'platform'>>([
   ['qq', { ...DEFAULT_MANIFEST, dmChannelPattern: /^dm:/ }],
+  // An IRC DM's channel is the peer's nick, and a nick never starts with a channel prefix.
+  ['irc', { ...DEFAULT_MANIFEST, dmChannelPattern: /^[^#&!+]/ }],
   // Slack is the only platform with an authoritative membership snapshot — which
   // is why the branches this replaces read "Slack does X, everyone else does Y".
   // It is also the only platform whose normalizer attributes bot authorship AND

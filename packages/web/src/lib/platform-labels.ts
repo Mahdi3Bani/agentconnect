@@ -52,6 +52,8 @@ const LABELS = new Map<string, PlatformLabel>([
   ['linear', { name: 'Linear', picker: 'Linear', sigil: '' }],
   // A Google Chat room is a named space, written without a "#".
   ['googlechat', { name: 'Google Chat', picker: 'Google Chat', sigil: '' }],
+  // An IRC channel's name already starts with its sigil (`#cantina`), so none is added.
+  ['irc', { name: 'IRC', picker: 'IRC', sigil: '' }],
   // Nothing routes a bare 'lark' id today (the cloud rides on its own `region`
   // field), but the substring chains this replaces accepted it.
   ['lark', { name: 'Lark', picker: 'Lark/Feishu', sigil: '' }]

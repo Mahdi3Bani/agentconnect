@@ -188,6 +188,7 @@ const READ_PORTS = new Map<string, PlatformReadPorts>([
       attachmentReadTool: QQ_ATTACHMENT_TOOL
     }
   ],
+  ['irc', { platform: 'irc', label: 'IRC' }],
   [
     'discord',
     {

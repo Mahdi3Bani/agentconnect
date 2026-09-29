@@ -793,6 +793,19 @@ export type CreateIntegrationInput =
       slack?: { botToken: string; appToken: string } | { botToken: string; signingSecret: string }
     })
   | (CreateIntegrationBase & { platform: 'qq'; qq?: { appId: string; appSecret: string } })
+  | (CreateIntegrationBase & {
+      platform: 'irc'
+      irc?: {
+        host: string
+        port: number
+        tls: boolean
+        nick: string
+        channels: string[]
+        saslAccount?: string
+        saslPassword?: string
+        serverPassword?: string
+      }
+    })
   | (CreateIntegrationBase & { platform: 'telegram'; telegram?: { botToken: string } })
   | (CreateIntegrationBase & { platform: 'discord'; discord?: { botToken: string } })
   | (CreateIntegrationBase & {

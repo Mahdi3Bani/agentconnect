@@ -13,11 +13,12 @@ used chat platforms. Nothing has been posted to them yet -- no issue, no PR.
 The branch is pushed to the fork `Mahdi3Bani/agentconnect` (remote `fork`);
 `origin` is still upstream, for pulling.
 
-## Status: slices 0, 1 and 2 are done and passing
+## Status: slices 0 to 3 are done and passing
 
 Slice 0 is the required half of `PlatformConnection` (`../contract.ts`), slice 1
 message normalization and sending, slice 2 the per-turn output surface and staying
-connected. Nothing is registered with the daemon yet.
+connected, slice 3 the registry wiring: IRC is installable from the console and
+the daemon opens, binds and routes it.
 
 ```sh
 cd ~/agentconnect/packages/daemon
@@ -115,20 +116,37 @@ asserted -- you cannot ask Libera.Chat to stop supporting `message-tags`.
 
 Not built yet: outbound `+draft/reply` tags; reclaiming the configured nick
 after a fallback (NickServ REGAIN); elicitation cards (absent means the core
-declines the ask with a notice); `IrcAction` joining `DaemonRenderAction` and
-the surface being registered in `daemon.ts`, which belong to the registry work.
+declines the ask with a notice).
 
-## Next: the maintainers, then the expensive part
+## Slice 3: the registry wiring
 
-Open an issue before the registry work: it can show a working adapter against
-the test server, and their answer to the open design question decides how the
-registry entries are shaped.
+Copied from QQ's registration, per #2262: no Prisma migration, no feature flag,
+no registry refactors.
 
-Then registry entries across daemon, protocol, control-plane and web, plus the
-manifest entry. Their QQ adapter touched 71 files. Guidance from #2262: do not
-add a Prisma migration (reuse `Bot.platform` / `platformConfig` / `BotSecret`),
-do not add a feature flag, do not refactor their registries -- copy the newest
-platform's registration entries in the current style.
+- **protocol**: `IntegrationIrcConfig`, `irc` in `KNOWN_PLATFORMS`, and a manifest
+  row whose one earned axis is `dmChannelPattern` (a DM's channel is a nick, and
+  a nick never starts with `#&!+`).
+- **control plane**: `platforms/irc/provider.ts`. The public login rides
+  `Bot.platformConfig`; the SASL password is the `botToken` slot, the server
+  password `appToken`. One nick per network is one bot (the D6 fence). No live
+  check at install: the daemon reaches the network, and a private server may be
+  invisible from the control plane.
+- **daemon**: `consolidateIrc` + `ircConnKey`, an `ircPool` in the reconciler,
+  and the binding map, turn surface, command chrome, egress and read port in
+  `daemon.ts`. A login whose server is down at boot retries every 60s; once up,
+  the connection keeps itself connected. Connection scope is the nick on its
+  network (a password rotation keeps it); the tenant is the network.
+- **web**: `components/console/platforms/irc/`, a form on the shared
+  `TokenGuidePane`.
+- **Found while wiring**: routing matches `mentionedBots` exactly against the
+  bound nick, so after a fallback (`nick_`) mentions stopped routing. The
+  normalizer now detects the live nick and reports the configured one. The bot
+  also joins channels it is `/invite`d to, which makes the wizard's "invite the
+  bot" hint true.
+
+## Next
+
+The live test on the team VM (Ergo + this branch), then the issue and PR.
 
 ## Things that only showed up by building it
 

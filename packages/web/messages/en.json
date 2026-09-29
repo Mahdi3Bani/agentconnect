@@ -1916,6 +1916,10 @@
         "googlechat": {
           "create": "Configure a Chat app in Google Cloud",
           "existing": "An unused Google Chat app"
+        },
+        "irc": {
+          "create": "A nick on an IRC network",
+          "existing": "An unused IRC bot"
         }
       }
     }
@@ -5533,6 +5537,24 @@
         "unreachable": "Google could not be reached. Try again.",
         "deploymentApp": "This Chat app belongs to this deployment; connect it by sending the app a message in Google Chat."
       }
+    },
+    "irc": {
+      "connect": "Connect",
+      "connecting": "Connecting…",
+      "networks": "Which networks support IRCv3",
+      "optional": "Optional",
+      "step1": "Pick the network and a nick for the bot. If the network has NickServ, register the nick first so the bot can log in with SASL and keep it.",
+      "step2": "Where the bot connects, and the channels it joins",
+      "server": "Server",
+      "port": "Port",
+      "nick": "Nick",
+      "channels": "Channels",
+      "saslAccount": "SASL account",
+      "saslPassword": "SASL password",
+      "serverPassword": "Server password",
+      "tls": "TLS",
+      "tlsOn": "Encrypted. Most networks listen for TLS on port 6697.",
+      "tlsOff": "Plaintext. Passwords cross the network readable; use it only on a server you run."
     }
   }
 }

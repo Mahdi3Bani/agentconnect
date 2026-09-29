@@ -196,3 +196,22 @@ describe('conversation audience', () => {
     }
   })
 })
+
+describe('IRC transport and tenant scope', () => {
+  const irc = (config: Record<string, unknown>) =>
+    ({ id: 'i9', platform: 'irc', config: { port: 6697, tls: true, ...config } }) as never
+
+  it('scopes a connection on its nick and network, not on its password', async () => {
+    const before = irc({ host: 'IRC.Example.net', nick: 'R2D2', saslAccount: 'r2d2', saslPassword: 'old' })
+    const after = irc({ host: 'irc.example.net', nick: 'r2d2', saslAccount: 'r2d2', saslPassword: 'new' })
+    expect(connectionIdentityFor(before)).toBe('irc://irc.example.net:6697/r2d2')
+    expect(connectionIdentityFor(after)).toBe(connectionIdentityFor(before))
+  })
+
+  it('makes the network the tenant, shared by every bot on it', async () => {
+    expect(await tenantScopeFor(host(), irc({ host: 'irc.example.net', nick: 'a' }))).toBe(
+      await tenantScopeFor(host(), irc({ host: 'irc.example.net', nick: 'b' }))
+    )
+    expect(await tenantScopeFor(host(), irc({ host: 'irc.example.net', nick: 'a' }))).toBe('irc://irc.example.net:6697')
+  })
+})

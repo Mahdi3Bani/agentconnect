@@ -1916,6 +1916,10 @@
         "googlechat": {
           "create": "在 Google Cloud 中配置一个 Chat 应用",
           "existing": "一个未使用的 Google Chat 应用"
+        },
+        "irc": {
+          "create": "IRC 网络上的一个昵称",
+          "existing": "一个未使用的 IRC 机器人"
         }
       }
     }
@@ -5533,6 +5537,24 @@
         "unreachable": "无法连接到 Google。请重试。",
         "deploymentApp": "这是部署自带的 Chat 应用，请在 Google Chat 中给它发一条消息来连接。"
       }
+    },
+    "irc": {
+      "connect": "连接",
+      "connecting": "连接中…",
+      "networks": "哪些网络支持 IRCv3",
+      "optional": "可选",
+      "step1": "选择网络并为机器人取一个昵称。如果该网络有 NickServ，请先注册该昵称，以便机器人通过 SASL 登录并保留它。",
+      "step2": "机器人连接的服务器，以及要加入的频道",
+      "server": "服务器",
+      "port": "端口",
+      "nick": "昵称",
+      "channels": "频道",
+      "saslAccount": "SASL 账号",
+      "saslPassword": "SASL 密码",
+      "serverPassword": "服务器密码",
+      "tls": "TLS",
+      "tlsOn": "已加密。大多数网络在 6697 端口提供 TLS。",
+      "tlsOff": "明文。密码会以可读形式在网络上传输；仅在你自己运行的服务器上使用。"
     }
   }
 }

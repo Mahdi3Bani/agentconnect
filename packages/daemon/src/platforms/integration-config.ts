@@ -25,6 +25,7 @@
 import type { z, ZodType } from 'zod'
 import {
   EMPTY_DECISION_BUNDLE,
+  IntegrationIrcConfig,
   IntegrationQQConfig,
   type DecisionBundle,
   type IntegrationSessionMode
@@ -49,7 +50,8 @@ const CONFIG_SCHEMAS = {
   feishu: FeishuConfigSchema,
   linear: LinearConfigSchema,
   qq: IntegrationQQConfig,
-  googlechat: GoogleChatConfigSchema
+  googlechat: GoogleChatConfigSchema,
+  irc: IntegrationIrcConfig
 } as const
 
 /** The union of every platform's validated config, derived from the registry

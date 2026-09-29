@@ -313,6 +313,9 @@ import { SlackConnection, type SlackAppFactory, type SlackStatusOptions } from '
 import { QQConnection } from './platforms/qq/connection.js'
 import { createQQTurnOutput } from './platforms/qq/surface.js'
 import { QQCommandChrome } from './platforms/qq/command-chrome.js'
+import type { IrcConnection } from './platforms/irc/connection.js'
+import { createIrcTurnOutput } from './platforms/irc/surface.js'
+import { ircCommandChrome } from './platforms/irc/command-chrome.js'
 import { TelegramConnection, type TelegramCallback } from './telegram/connection.js'
 import { DiscordConnection } from './discord/connection.js'
 import { FeishuConnection } from './feishu/connection.js'
@@ -1306,6 +1309,7 @@ export class Daemon {
     registry.register(linearCommandChrome)
     registry.register(QQCommandChrome)
     registry.register(googleChatCommandChrome)
+    registry.register(ircCommandChrome)
     return registry
   })()
 
@@ -1391,6 +1395,20 @@ export class Daemon {
       })
       registry.register(
         createQQTurnOutput(async (p, text) => {
+          if (p.plan.transcriptChannel && p.plan.statusThread)
+            await this.store.appendTranscript({
+              channel: p.plan.transcriptChannel,
+              thread: p.plan.statusThread,
+              admission: { agentId: p.plan.agentId, sessionKey: p.plan.sessionKey },
+              ts: monotonicTs(),
+              sender: p.plan.agentId,
+              kind: 'text',
+              text
+            })
+        })
+      )
+      registry.register(
+        createIrcTurnOutput(async (p, text) => {
           if (p.plan.transcriptChannel && p.plan.statusThread)
             await this.store.appendTranscript({
               channel: p.plan.transcriptChannel,
@@ -1515,6 +1533,7 @@ export class Daemon {
   private lnConnByIntegration = new Map<string, LinearConnection>()
   // integrationId -> the GoogleChatConnection that owns it: relay-terminated ingress, daemon-direct Chat API egress.
   private gcConnByIntegration = new Map<string, GoogleChatConnection>()
+  private ircConnByIntegration = new Map<string, IrcConnection>()
   // One Google Chat write budget per app on this daemon (§10.8), built from the config on first use.
   private googleChatBudgets: GoogleChatWriteBudgets | undefined
   // Sessions whose console link already sits in the issue's Resources (Linear keys the entry
@@ -2159,7 +2178,8 @@ export class Daemon {
         feishu: this.fsConnByIntegration,
         qq: this.QQConnByIntegration,
         linear: this.lnConnByIntegration,
-        googlechat: this.gcConnByIntegration
+        googlechat: this.gcConnByIntegration,
+        irc: this.ircConnByIntegration
       }),
       bindSlack: (integrationId, conn, botUserId) => {
         this.bind(this.connByIntegration, integrationId, conn, botUserId)
@@ -2176,6 +2196,7 @@ export class Daemon {
         this.bind(this.lnConnByIntegration, integrationId, conn, appUserId),
       bindGoogleChat: (integrationId, conn, appUserName) =>
         this.bind(this.gcConnByIntegration, integrationId, conn, appUserName),
+      bindIrc: (integrationId, conn, nick) => this.bind(this.ircConnByIntegration, integrationId, conn, nick),
       unbindIntegration: (integrationId) => this.unbindIntegration(integrationId),
       slackNameResolver: () => this.nameResolver,
       channelNameResolver: () => this.channelNameResolver,
@@ -2261,6 +2282,7 @@ export class Daemon {
     this.lnConnByIntegration.delete(integrationId)
     this.QQConnByIntegration.delete(integrationId)
     this.gcConnByIntegration.delete(integrationId)
+    this.ircConnByIntegration.delete(integrationId)
     delete this.botUserIds[integrationId]
     this.channelSnapshots.delete(integrationId)
   }
@@ -4630,6 +4652,9 @@ export class Daemon {
     void this.connections
       .reconcileGoogleChatConnections()
       .catch((err) => this.log.error(`googlechat: initial connect failed: ${formatErr(err)}`))
+    void this.connections
+      .reconcileIrcConnections()
+      .catch((err) => this.log.error(`irc: initial connect failed: ${formatErr(err)}`))
   }
 
   /** Phase 28 — register crons per agent; the same converge reconcile re-runs on change. */
@@ -5076,6 +5101,7 @@ export class Daemon {
       await this.connections.reconcileLinearConnections()
       await this.connections.reconcileGoogleChatConnections()
       await this.connections.reconcileQQConnections()
+      await this.connections.reconcileIrcConnections()
       // Converged for real: the sockets a duty change invalidated are closed. Publishing the
       // CLAIMED value (not the current one) leaves a duty change that landed mid-pass outstanding,
       // so the trailing re-run still converges it.
@@ -12202,7 +12228,8 @@ export class Daemon {
   private readonly platformTurnEgress = new Map<string, (integrationId?: string) => PlatformConnection | undefined>([
     ['qq', (id) => (id ? this.QQConnByIntegration.get(id) : undefined)],
     ['linear', (integrationId) => (integrationId ? this.lnConnByIntegration.get(integrationId) : undefined)],
-    ['googlechat', (integrationId) => (integrationId ? this.gcConnByIntegration.get(integrationId) : undefined)]
+    ['googlechat', (integrationId) => (integrationId ? this.gcConnByIntegration.get(integrationId) : undefined)],
+    ['irc', (integrationId) => (integrationId ? this.ircConnByIntegration.get(integrationId) : undefined)]
   ])
 
   private readonly platformFailureSinks = new Map<
@@ -19201,6 +19228,7 @@ export class Daemon {
     for (const [id, c] of this.QQConnByIntegration) if (c === conn) out.push(id)
     for (const [id, c] of this.lnConnByIntegration) if (c === conn) out.push(id)
     for (const [id, c] of this.gcConnByIntegration) if (c === conn) out.push(id)
+    for (const [id, c] of this.ircConnByIntegration) if (c === conn) out.push(id)
     return out
   }
 
@@ -19878,7 +19906,8 @@ export class Daemon {
       this.connForIntegration(integrationId) ??
       this.lnConnByIntegration.get(integrationId) ??
       this.QQConnByIntegration.get(integrationId) ??
-      this.gcConnByIntegration.get(integrationId)
+      this.gcConnByIntegration.get(integrationId) ??
+      this.ircConnByIntegration.get(integrationId)
     )
   }
 

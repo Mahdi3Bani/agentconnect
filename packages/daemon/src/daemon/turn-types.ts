@@ -19,6 +19,7 @@ import type { DiscordAction, DiscordConverger } from '../discord/render.js'
 import type { FeishuAction, FeishuConverger } from '../feishu/render.js'
 import type { LinearAction, LinearConverger } from '../platforms/linear/turn-output.js'
 import type { QQAction, QQConverger } from '../platforms/qq/turn-output.js'
+import type { IrcAction, IrcConverger } from '../platforms/irc/turn-output.js'
 import type { GoogleChatAction, GoogleChatConverger } from '../platforms/googlechat/turn-output.js'
 import type { PlatformConnection } from '../platforms/connection-reconciler.js'
 import type { SlackConnection } from '../slack/connection.js'
@@ -462,9 +463,10 @@ export interface MemoryExtractionCollector {
  *  turn record is still core-owned (they dissolve when the convergers move with
  *  their platforms). */
 export type DaemonRenderAction =
-  QQAction | SlackAction | TelegramAction | DiscordAction | FeishuAction | LinearAction | GoogleChatAction
+  QQAction | SlackAction | TelegramAction | DiscordAction | FeishuAction | LinearAction | GoogleChatAction | IrcAction
 export type DaemonConverger =
   | QQConverger
+  | IrcConverger
   | OutputConverger
   | TelegramConverger
   | DiscordConverger

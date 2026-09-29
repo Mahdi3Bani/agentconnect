@@ -55,6 +55,7 @@ import { consolidateLinear, linearConnKey, LinearConnection } from './linear/con
 import { consolidateGoogleChat, GoogleChatConnection } from './googlechat/connection.js'
 import type { GoogleChatWriteBudgets } from './googlechat/write-budget.js'
 import { QQConnection, consolidateQQ, QQConnKey } from './qq/connection.js'
+import { consolidateIrc, IrcConnection } from './irc/connection.js'
 import type { ObservedChat } from './observed-channels.js'
 import { ConnectionPool, type ConnectionKey } from './registry.js'
 import { CredentialRevocationReporter } from './credential-revocation.js'
@@ -72,6 +73,7 @@ export type PlatformConnection =
   | LinearConnection
   | QQConnection
   | GoogleChatConnection
+  | IrcConnection
 
 /**
  * The UI-action callbacks every platform connection is constructed with — a status-bar tap,
@@ -136,6 +138,7 @@ export interface ConnectionReconcilerHost extends PlatformActionSink {
     linear: ReadonlyMap<string, LinearConnection>
     qq?: ReadonlyMap<string, QQConnection>
     googlechat: ReadonlyMap<string, GoogleChatConnection>
+    irc: ReadonlyMap<string, IrcConnection>
   }
   /** Point an integration at a live connection and record the identity mention-routing
    *  matches — the bot user id on Slack/Discord, the @username on Telegram, the open_id on
@@ -149,6 +152,8 @@ export interface ConnectionReconcilerHost extends PlatformActionSink {
   bindLinear(integrationId: string, conn: LinearConnection, appUserId: string): void
   /** The Chat app's `users/…` identity, once discovered; '' until then. */
   bindGoogleChat(integrationId: string, conn: GoogleChatConnection, appUserName: string): void
+  /** The configured nick: what the normalizer reports in `mentionedBots`, whatever fallback nick the server gave. */
+  bindIrc(integrationId: string, conn: IrcConnection, nick: string): void
   /** Drop an integration's connection binding, bot identity and channel snapshot together. */
   unbindIntegration(integrationId: string): void
   slackNameResolver(): SlackNameResolver | undefined
@@ -216,6 +221,52 @@ export class ConnectionReconciler {
     }
   }
 
+  readonly ircPool = new ConnectionPool<IrcConnection>('irc', (conn) => conn.key)
+  // One pending retry for every IRC login that failed its first connect; the reconcile it re-runs skips live ones.
+  private ircRetryTimer: TimerHandle | undefined
+
+  /** Open a connection per IRC login; once up, each keeps itself connected, so only a failed first connect needs a retry. */
+  async reconcileIrcConnections(): Promise<void> {
+    let failed = false
+    for (const [key, group] of consolidateIrc(this.host.transportAgents())) {
+      let conn = this.ircPool.find(key)
+      if (!conn) {
+        if (!this.ircPool.beginConnect(key)) continue
+        const created: IrcConnection = new IrcConnection(group.config, {
+          log: this.log,
+          onMessage: (msg) => {
+            this.host.channelNameResolver()?.noteMessage(created, msg)
+            this.host.onInbound(msg, this.host.srcIntegrationIds(created))
+          }
+        })
+        conn = created
+        try {
+          await conn.start()
+          if (this.host.draining() || !consolidateIrc(this.host.transportAgents()).has(key)) {
+            await conn.stop()
+            continue
+          }
+          this.ircPool.add(conn)
+          this.log.info(`irc: connected to ${group.config.host} as ${conn.botUserId}`)
+        } catch (err) {
+          await conn.stop().catch(() => {})
+          this.log.warn(`irc: could not connect to ${group.config.host}; retrying in 60s: ${formatErr(err)}`)
+          failed = true
+          continue
+        } finally {
+          this.ircPool.endConnect(key)
+        }
+      }
+      for (const { integrationId } of group.integrations) this.host.bindIrc(integrationId, conn, conn.botUserId)
+    }
+    if (failed && !this.ircRetryTimer && !this.host.draining())
+      this.ircRetryTimer = this.host.clock().setTimeout(() => {
+        this.ircRetryTimer = undefined
+        if (!this.host.draining())
+          void this.reconcileIrcConnections().catch((err) => this.log.warn(`irc: retry failed: ${formatErr(err)}`))
+      }, 60_000)
+  }
+
   // §7.5 connection pools — one per (platform, MODE), each keyed by the platform's
   // own opaque identity function. The pool owns the live set AND the in-flight
   // connect guard: a key is claimed BEFORE `await conn.start()` and released when
@@ -272,7 +323,8 @@ export class ConnectionReconciler {
       this.feishuPool,
       this.linearPool,
       this.QQPool,
-      this.googleChatPool
+      this.googleChatPool,
+      this.ircPool
     ]
   }
 
@@ -413,8 +465,13 @@ export class ConnectionReconciler {
     const QQByIntegration = new Map<string, string>()
     for (const [key, group] of QQGroups)
       for (const { integrationId } of group.integrations) QQByIntegration.set(integrationId, key)
+    const ircGroups = consolidateIrc(agents)
+    const ircByIntegration = new Map<string, string>()
+    for (const [key, group] of ircGroups)
+      for (const { integrationId } of group.integrations) ircByIntegration.set(integrationId, key)
     const allDesiredIds = new Set([
       ...QQByIntegration.keys(),
+      ...ircByIntegration.keys(),
       ...directByIntegration.keys(),
       ...sharedByIntegration.keys(),
       ...telegramByIntegration.keys(),
@@ -469,6 +526,9 @@ export class ConnectionReconciler {
     for (const [integrationId, conn] of bindings.googlechat) {
       if (conn.key !== googleChatByIntegration.get(integrationId)) this.host.unbindIntegration(integrationId)
     }
+    for (const [integrationId, conn] of bindings.irc) {
+      if (conn.key !== ircByIntegration.get(integrationId)) this.host.unbindIntegration(integrationId)
+    }
 
     // A startup retry captures only the stable appToken and re-reads the live
     // group when it fires. Cancel timers for keys whose final reference vanished.
@@ -501,6 +561,7 @@ export class ConnectionReconciler {
     await this.prunePool(this.QQPool, new Set(QQGroups.keys()))
     await this.prunePool(this.linearPool, new Set([...linear.values()].map((group) => group.key)))
     await this.prunePool(this.googleChatPool, new Set(googleChat.keys()))
+    await this.prunePool(this.ircPool, new Set(ircGroups.keys()))
   }
 
   /** Close every connection in `pool` whose opaque identity consolidation no
@@ -1319,6 +1380,8 @@ export class ConnectionReconciler {
   cancelRetryTimers(): void {
     for (const t of this.slackRetryTimers.values()) this.host.clock().clearTimeout(t)
     this.slackRetryTimers.clear()
+    if (this.ircRetryTimer) this.host.clock().clearTimeout(this.ircRetryTimer)
+    this.ircRetryTimer = undefined
     this.revocations.stop()
   }
 

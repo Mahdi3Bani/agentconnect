@@ -80,6 +80,22 @@ export type IntegrationSlackConfig = z.infer<typeof IntegrationSlackConfig>
 export const IntegrationQQConfig = z.object({ appId: z.string().min(1), appSecret: z.string().min(1) })
 export type IntegrationQQConfig = z.infer<typeof IntegrationQQConfig>
 
+/** An IRC network login: no token, just a server, a nick and optional SASL and server passwords (never log them). */
+export const IntegrationIrcConfig = z.object({
+  host: z.string().min(1),
+  port: z.number().int().min(1).max(65535).default(6697),
+  tls: z.boolean().default(true),
+  nick: z.string().min(1),
+  username: z.string().min(1).optional(),
+  realname: z.string().min(1).optional(),
+  saslAccount: z.string().min(1).optional(),
+  saslPassword: z.string().min(1).optional(),
+  serverPassword: z.string().min(1).optional(),
+  // IRC has no invites for bots: the connection joins these on every (re)connect.
+  channels: z.array(z.string().min(1)).default([])
+})
+export type IntegrationIrcConfig = z.infer<typeof IntegrationIrcConfig>
+
 /**
  * The Telegram config payload — long-polling + routing (grammY). Telegram has a
  * SINGLE BotFather HTTP token — no app-level token and no signing secret

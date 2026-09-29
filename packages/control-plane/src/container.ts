@@ -278,6 +278,7 @@ import { codeHostProviders } from './codehost/registry.js'
 import { CodeHostTrustedActorService } from './codehost/trusted-actor.service.js'
 import { botIdentityProjector } from './platforms/bot-identity.js'
 import { buildPendingInstallReapers, platformBackgroundLoops } from './platforms/lifecycle.js'
+import { createIrcCpProvider } from './platforms/irc/provider.js'
 import { createQQCpProvider } from './platforms/qq/provider.js'
 import { QQCredentialRoutes } from './platforms/qq/routes.js'
 import { createTelegramCpProvider } from './platforms/telegram/provider.js'
@@ -2226,6 +2227,7 @@ export function buildContainer(
   // above.
   composedPlatforms = buildCpPlatformRegistry([
     createQQCpProvider(undefined, [QQCredentialRoutes(httpDeps)]),
+    createIrcCpProvider(),
     createTelegramCpProvider({
       verifyBot: verifyTelegramBot,
       syncBotIcon: syncTelegramBotIcon,

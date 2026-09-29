@@ -106,6 +106,17 @@ describe('platform manifest', () => {
     expect(continuableOrigin(GOOGLE_CHAT_PLATFORM)).toBe(false)
   })
 
+  it('reads an IRC nick as a DM and a channel prefix as a channel, and earns nothing else', () => {
+    const { platform, dmChannelPattern, ...axes } = manifestFor('irc')
+    expect(platform).toBe('irc')
+    const { dmChannelPattern: _none, ...defaults } = DEFAULT_MANIFEST
+    expect(axes).toEqual(defaults)
+    for (const dm of ['han', '[bot]', '_x']) expect(dmChannelPattern?.test(dm), dm).toBe(true)
+    for (const channel of ['#cantina', '&local', '!12345ops', '+modeless'])
+      expect(dmChannelPattern?.test(channel), channel).toBe(false)
+    expect(continuableOrigin('irc')).toBe(false)
+  })
+
   it('composes with origin kind for arms whose fall-through serves non-chat origins', () => {
     // backfillChannelNames and the first-seen-chat refresh both gate on BOTH axes:
     // hook / dream / webchat have no manifest and must keep the core path, so a

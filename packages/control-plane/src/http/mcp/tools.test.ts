@@ -534,7 +534,7 @@ describe('MCP tool registry — §6.2 invariants', () => {
     for (const platform of KNOWN_PLATFORMS) {
       expect(schema.safeParse({ platform }).success, `platform=${platform} must be filterable`).toBe(true)
     }
-    expect(schema.safeParse({ platform: 'irc' }).success).toBe(false)
+    expect(schema.safeParse({ platform: 'matrix' }).success).toBe(false)
   })
 
   it('whoami merges /me and the org view, and surfaces the first failure', async () => {

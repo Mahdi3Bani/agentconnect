@@ -14,7 +14,10 @@ export interface IrcMessageEvent {
 
 /** Per-connection facts the normalizer needs; all of them come from the server, not the platform. */
 export interface IrcNormalizeContext {
+  /** The nick the bot holds right now, which may be a fallback like `nick_`. */
   botNick: string
+  /** The identity routing matches in `mentionedBots`; the configured nick, stable across fallbacks. Defaults to `botNick`. */
+  botId?: string
   /** ISUPPORT CHANTYPES; `#&` when the server did not say. */
   chantypes?: string | readonly string[]
   /** ISUPPORT CASEMAPPING; `rfc1459` when the server did not say. */
@@ -125,7 +128,7 @@ export function normalizeIrcMessage(
       name: event.nick
     },
     text: body,
-    mentionedBots: mentioned ? [ctx.botNick] : [],
+    mentionedBots: mentioned ? [ctx.botId ?? ctx.botNick] : [],
     isDm,
     ...(replyTo ? { replyTo } : {}),
     // Native msgids are opaque, not chronological, so the time always travels separately.

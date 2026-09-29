@@ -138,6 +138,7 @@ describe('platform set', () => {
       expect(platformOffered('googlechat')).toBe(false)
       expect(platformOffered('slack')).toBe(true)
       expect(platformOffered('webhook')).toBe(true)
+      expect(platformOffered('irc')).toBe(true)
       vi.stubEnv('FEATURE_FLAGS', 'git-url,qq,google-chat')
       expect(platformOffered('qq')).toBe(true)
       expect(platformOffered('googlechat')).toBe(true)
@@ -150,6 +151,7 @@ describe('platform set', () => {
       expect(shown([{ platform: 'qq' }])).toContain('qq')
       expect(shown([])).not.toContain('googlechat')
       expect(shown([{ platform: 'googlechat' }])).toContain('googlechat')
+      expect(shown([])).toContain('irc')
       vi.stubEnv('FEATURE_FLAGS', 'qq,google-chat')
       expect(visibleBotPlatformTabs([])).toEqual(BOT_PLATFORM_TABS)
     })
@@ -175,7 +177,8 @@ describe('platform set', () => {
       'Feishu',
       'Linear',
       'QQ',
-      'Google Chat'
+      'Google Chat',
+      'IRC'
     ])
   })
 
