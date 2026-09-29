@@ -201,7 +201,10 @@ export class IrcConnection implements PlatformConnection {
       username: this.config.username ?? this.config.nick,
       gecos: this.config.realname ?? this.config.nick,
       password: this.config.serverPassword,
-      account: this.config.account,
+      // irc-framework reads `account.account`; any other shape silently skips SASL.
+      ...(this.config.account
+        ? { account: { account: this.config.account.username, password: this.config.account.password } }
+        : {}),
       enable_chghost: true,
       // Opt-in in irc-framework, and what turns a send into a confirmed send.
       enable_echomessage: true,

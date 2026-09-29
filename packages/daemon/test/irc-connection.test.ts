@@ -289,3 +289,18 @@ describe('long answers', () => {
     for (const line of lines) expect([...line].filter((ch) => ch === '\x02').length % 2).toBe(0)
   })
 })
+
+describe('SASL', () => {
+  it('logs in with the configured account, the shape irc-framework actually reads', async () => {
+    server = await startTestServer({ saslAccounts: { r2d2: 'beep' } })
+    conn = new IrcConnection({
+      host: '127.0.0.1',
+      port: server.port,
+      tls: false,
+      nick: 'r2d2',
+      account: { username: 'r2d2', password: 'beep' }
+    })
+    await conn.start()
+    expect(server.authenticated).toEqual(['r2d2'])
+  })
+})

@@ -13,7 +13,7 @@ declare module 'irc-framework' {
     username?: string
     gecos?: string
     password?: string
-    account?: { account: string; password: string } | { username: string; password: string }
+    account?: { account: string; password: string }
     enable_chghost?: boolean
     enable_echomessage?: boolean
     enable_setname?: boolean

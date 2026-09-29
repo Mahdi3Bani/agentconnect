@@ -17,6 +17,8 @@ export interface TestServerOptions {
   withholdEcho?: boolean
   /** Nicks already held by someone else, answered with 433 at registration. */
   takenNicks?: string[]
+  /** SASL PLAIN logins (account to password); when set, `sasl` is advertised. */
+  saslAccounts?: Record<string, string>
 }
 
 export interface TestServer {
@@ -24,6 +26,8 @@ export interface TestServer {
   close(): Promise<void>
   /** Lines the server received, for asserting what the adapter actually sent. */
   received: string[]
+  /** Accounts that logged in with SASL, in order. */
+  authenticated: string[]
   /** Push a line at the connected client, e.g. an inbound PRIVMSG. */
   push(line: string): void
   /** Drop the current client's socket, as a netsplit or ping timeout would. */
@@ -35,7 +39,11 @@ export interface TestServer {
 }
 
 export async function startTestServer(options: TestServerOptions = {}): Promise<TestServer> {
-  const caps = options.caps ?? ['message-tags', 'server-time', 'echo-message', 'account-tag', 'multi-prefix']
+  const caps = [
+    ...(options.caps ?? ['message-tags', 'server-time', 'echo-message', 'account-tag', 'multi-prefix']),
+    ...(options.saslAccounts ? ['sasl'] : [])
+  ]
+  const authenticated: string[] = []
   const members = options.members ?? { '#cantina': ['@han', '+leia', 'chewie'] }
   const channels = options.channels ?? [{ name: '#cantina', users: 3, topic: 'no droids' }]
 
@@ -112,6 +120,22 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
             break
           }
 
+          case 'AUTHENTICATE': {
+            const arg = args[0] ?? ''
+            if (arg === 'PLAIN') {
+              send('AUTHENTICATE +')
+              break
+            }
+            // authzid NUL authcid NUL password, base64-encoded.
+            const [, account = '', password = ''] = Buffer.from(arg, 'base64').toString('utf8').split('\0')
+            if (options.saslAccounts?.[account] === password && password) {
+              authenticated.push(account)
+              send(`:server 900 ${nick} ${nick}!u@h ${account} :You are now logged in as ${account}`)
+              send(`:server 903 ${nick} :SASL authentication successful`)
+            } else send(`:server 904 ${nick} :SASL authentication failed`)
+            break
+          }
+
           case 'USER':
             userSent = true
             if (!negotiating) welcome()
@@ -173,6 +197,7 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
   return {
     port,
     received,
+    authenticated,
     push: (line) => send(line),
     drop: () => client?.destroy(),
     connections: () => accepted,
