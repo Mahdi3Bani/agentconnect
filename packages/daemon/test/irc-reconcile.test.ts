@@ -35,6 +35,7 @@ const agentOn = (port: number, nick = 'r2d2'): LoadedAgent =>
 function harness(agents: () => LoadedAgent[]) {
   const inbound: { msg: NormalizedMessage; ids?: string[] }[] = []
   const bound = new Map<string, string>()
+  const connOf = new Map<string, unknown>()
   const timers: (() => void)[] = []
   reconciler = new ConnectionReconciler({
     transportAgents: agents,
@@ -46,9 +47,10 @@ function harness(agents: () => LoadedAgent[]) {
       clearTimeout: vi.fn()
     }),
     channelNameResolver: () => undefined,
-    srcIntegrationIds: () => [...bound.keys()],
+    // Mirrors daemon.ts' reverse lookup: only the installs this very connection serves.
+    srcIntegrationIds: (conn: unknown) => [...connOf].filter(([, c]) => c === conn).map(([id]) => id),
     onInbound: (msg: NormalizedMessage, ids?: string[]) => inbound.push({ msg, ids }),
-    bindIrc: (id: string, _conn: unknown, nick: string) => bound.set(id, nick)
+    bindIrc: (id: string, conn: unknown, nick: string) => (connOf.set(id, conn), bound.set(id, nick))
   } as unknown as ConnectionReconcilerHost)
   return { reconciler, inbound, bound, timers }
 }
@@ -70,6 +72,30 @@ describe('IRC connections under the reconciler', () => {
     // Idempotent: a second pass finds the live connection instead of opening another.
     await reconciler.reconcileIrcConnections()
     expect(irc.connections()).toBe(1)
+  })
+
+  it('shares one connection between two agents installed on the same login', async () => {
+    const irc = await server()
+    const second = (base: LoadedAgent): LoadedAgent =>
+      ({
+        ...base,
+        id: 'agent-2',
+        integrations: [{ ...base.integrations[0]!, id: 'irc-install-2' }]
+      }) as unknown as LoadedAgent
+    const first = agentOn(irc.port)
+    const { reconciler, inbound, bound } = harness(() => [first, second(first)])
+    await reconciler.reconcileIrcConnections()
+
+    // One login is one socket, however many agents reuse the bot behind it.
+    expect(reconciler.ircPool.all()).toHaveLength(1)
+    expect(irc.connections()).toBe(1)
+    // Both installs are bound, so each agent's routing rules can arbitrate the same message.
+    expect([...bound.keys()].sort()).toEqual(['irc-install', 'irc-install-2'])
+    expect(bound.get('irc-install-2')).toBe('r2d2')
+
+    irc.push(':han!h@host PRIVMSG #cantina :r2d2: status?')
+    await vi.waitFor(() => expect(inbound).toHaveLength(1))
+    expect(inbound[0]!.ids).toEqual(['irc-install', 'irc-install-2'])
   })
 
   it('binds the configured nick even when the server hands out a fallback', async () => {
