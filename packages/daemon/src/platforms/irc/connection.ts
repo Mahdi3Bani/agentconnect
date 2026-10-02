@@ -380,8 +380,16 @@ export class IrcConnection implements PlatformConnection {
 
   // ── outbound ──
 
-  /** Split to fit the relayed 512-byte line, pace under flood control, and resolve once each line is echoed or times out. */
-  async sendText(target: string, text: string, options: { maxLines?: number } = {}): Promise<IrcSendReceipt[]> {
+  /**
+   * Split to fit the relayed 512-byte line, pace under flood control, and resolve once each line is echoed or times out.
+   * `tags` ride the FIRST line only, so a tagged message is addressed by that line's msgid; they are dropped where the
+   * server did not grant message-tags. Tags are outside the 512-byte budget, which is the body's alone.
+   */
+  async sendText(
+    target: string,
+    text: string,
+    options: { maxLines?: number; tags?: Record<string, string> } = {}
+  ): Promise<IrcSendReceipt[]> {
     assertIrcTarget(target)
     const budget = ircPayloadBudget('PRIVMSG', target, {
       nick: this.nick,
@@ -395,7 +403,8 @@ export class IrcConnection implements PlatformConnection {
       lines = [...lines.slice(0, maxLines - 1), `[… ${dropped} more lines not sent]`]
     }
     const echo = this.negotiated.has('echo-message')
-    const receipts = carryFormatting(lines).map(async (line): Promise<IrcSendReceipt> => {
+    const tagPrefix = options.tags && this.negotiated.has('message-tags') ? ircTagPrefix(options.tags) : ''
+    const receipts = carryFormatting(lines).map(async (line, index): Promise<IrcSendReceipt> => {
       const key = this.echoKey(target, line)
       let settle: EchoWaiter = () => {}
       const echoed = new Promise<{ msgid?: string } | null>((resolve) => (settle = resolve))
@@ -405,7 +414,7 @@ export class IrcConnection implements PlatformConnection {
           // irc-framework drops a write on a closed socket silently, so a send between drop and 001 fails here instead.
           if (!this.registered) throw new Error('IRC connection is down')
           if (echo) this.awaitingEcho.set(key, [...(this.awaitingEcho.get(key) ?? []), settle])
-          this.client.raw(`PRIVMSG ${target} :${line}`)
+          this.client.raw(`${index === 0 ? tagPrefix : ''}PRIVMSG ${target} :${line}`)
         },
         () => this.flood.take()
       )
@@ -520,4 +529,12 @@ export class IrcConnection implements PlatformConnection {
   async downloadFile(): Promise<Buffer | null> {
     return null
   }
+}
+
+/** `@key=value;key2=value2 `, values escaped as IRCv3 message-tags requires; empty for no tags. */
+export function ircTagPrefix(tags: Record<string, string>): string {
+  const escape = (value: string) =>
+    value.replace(/\\/g, '\\\\').replace(/;/g, '\\:').replace(/ /g, '\\s').replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+  const parts = Object.entries(tags).map(([key, value]) => (value === '' ? key : `${key}=${escape(value)}`))
+  return parts.length ? `@${parts.join(';')} ` : ''
 }

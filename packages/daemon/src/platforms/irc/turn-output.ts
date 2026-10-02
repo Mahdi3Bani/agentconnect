@@ -15,6 +15,8 @@ export const IRC_MAX_ANSWER_LINES = { channel: 12, dm: 40 }
 const PROGRESS_MAX_BYTES = 300
 const PROGRESS_MAX_COUNT = 2
 const PROGRESS_MIN_GAP_MS = 15_000
+// A notice (e.g. why a question could not be asked here) is a sentence or two.
+const NOTICE_MAX_LINES = 3
 
 export type IrcAction = {
   kind: 'post' | 'irc-progress'
@@ -25,7 +27,11 @@ export type IrcAction = {
 
 /** What a turn needs from the connection; `IrcConnection` is one. */
 export interface IrcReplyPort {
-  sendText(target: string, text: string, options?: { maxLines?: number }): Promise<IrcSendReceipt[]>
+  sendText(
+    target: string,
+    text: string,
+    options?: { maxLines?: number; tags?: Record<string, string> }
+  ): Promise<IrcSendReceipt[]>
 }
 
 // IRC cannot edit or delete, so nothing streams: one final post, and progress only as rationed completed messages.
@@ -133,13 +139,19 @@ export async function applyIrcAction(
   action: { kind: string; text?: string; recordOnly?: boolean },
   record: (text: string) => Promise<void>
 ): Promise<void> {
-  if (!action.text || (action.kind !== 'post' && action.kind !== 'irc-progress')) return
+  if (!action.text) return
+  // Core's notices are chrome: posted, never recorded, as on every other surface.
+  if (action.kind === 'notice') {
+    if (state.conn)
+      await state.conn.sendText(state.target, addressed(state, action.text), { maxLines: NOTICE_MAX_LINES })
+    return
+  }
+  if (action.kind !== 'post' && action.kind !== 'irc-progress') return
   // A final answer identical to the progress line already sent would be the same line twice.
   if (action.kind === 'post' && !action.recordOnly && action.text === state.lastProgress) return
   await record(action.text)
   if (action.recordOnly || !state.conn) return
-  // `nick: text` is how a channel reply says who it answers; a DM needs no address.
-  const text = !state.isDm && state.askedBy ? `${state.askedBy}: ${action.text}` : action.text
+  const text = addressed(state, action.text)
   if (action.kind === 'irc-progress') {
     await state.conn.sendText(state.target, text, { maxLines: 1 })
     state.lastProgress = action.text
@@ -148,4 +160,9 @@ export async function applyIrcAction(
   await state.conn.sendText(state.target, text, {
     maxLines: state.isDm ? IRC_MAX_ANSWER_LINES.dm : IRC_MAX_ANSWER_LINES.channel
   })
+}
+
+// `nick: text` is how a channel reply says who it answers; a DM needs no address.
+function addressed(state: IrcTurnState, text: string): string {
+  return !state.isDm && state.askedBy ? `${state.askedBy}: ${text}` : text
 }

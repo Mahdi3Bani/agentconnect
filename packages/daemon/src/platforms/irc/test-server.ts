@@ -81,9 +81,19 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
       const lines = buffer.split('\r\n')
       buffer = lines.pop() ?? ''
 
-      for (const line of lines) {
-        if (!line) continue
-        received.push(line)
+      for (const raw of lines) {
+        if (!raw) continue
+        received.push(raw)
+        // A line may lead with IRCv3 tags; a real server relays the client-only (`+`) ones with the message.
+        const tagged = raw.startsWith('@') ? raw.indexOf(' ') : -1
+        const clientTags =
+          tagged > 0 && acked.has('message-tags')
+            ? raw
+                .slice(1, tagged)
+                .split(';')
+                .filter((t) => t.startsWith('+'))
+            : []
+        const line = tagged > 0 ? raw.slice(tagged + 1) : raw
         const [command = '', ...args] = line.split(' ')
 
         switch (command.toUpperCase()) {
@@ -176,6 +186,7 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
             const target = args[0] ?? ''
             const text = line.slice(line.indexOf(' :') + 2)
             const tags = [
+              ...clientTags,
               ...(acked.has('message-tags') ? [`msgid=srv${++msgSeq}`] : []),
               ...(acked.has('server-time') ? [`time=${new Date().toISOString()}`] : [])
             ]

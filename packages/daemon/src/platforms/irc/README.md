@@ -114,9 +114,20 @@ asserted -- you cannot ask Libera.Chat to stop supporting `message-tags`.
   (irc-framework drops it silently). A taken nick falls back to `nick_`,
   `nick__`, `nick3`...; mentions follow the nick actually held.
 
-Not built yet: outbound `+draft/reply` tags; reclaiming the configured nick
-after a fallback (NickServ REGAIN); elicitation cards (absent means the core
-declines the ask with a notice).
+- **Elicitation cards** (`elicit-card.ts`): a one-field enum or boolean ask is
+  posted as `nick: question [1] a [2] b (reply to this with a number)`, and a
+  reply to it (`+draft/reply`) naming a number or label answers it. The options
+  also ride a `+mosircley.de/card` client tag, so MosIrcley draws them as
+  buttons; a tap is the same reply, with the label as its text (format:
+  MosIrcley's `docs/agent-cards.md`). IRC cannot edit, so the verdict is a
+  line threaded under the card. A server that assigns no msgid leaves nothing
+  to reply to, so the card counts as refused. Typed and multi-field asks are
+  still declined with core's notice, which is now posted (it used to be
+  dropped). A plain client that cannot send `+draft/reply` cannot answer: core
+  only offers replies to a card.
+
+Not built yet: reclaiming the configured nick after a fallback (NickServ
+REGAIN).
 
 ## Slice 3: the registry wiring
 

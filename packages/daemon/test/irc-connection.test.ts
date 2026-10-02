@@ -197,6 +197,22 @@ describe('outbound PRIVMSG', () => {
     await expect(c.sendText('#cantina\r\nQUIT', 'x')).rejects.toThrow(/invalid IRC target/)
     await expect(c.sendText('#a #b', 'x')).rejects.toThrow(/invalid IRC target/)
   })
+  it('sends tags on the first line only, escaped, and is still confirmed by its echo', async () => {
+    const c = await connect()
+    const receipts = await c.sendText('#cantina', 'word '.repeat(200), {
+      tags: { '+mosircley.de/card': '{"v":1,"options":["a b","c;d"]}' }
+    })
+    expect(receipts.every((r) => r.confirmed)).toBe(true)
+    const sent = server!.received.filter((l) => l.includes('PRIVMSG'))
+    expect(sent[0]).toMatch(/^@\+mosircley\.de\/card=\{"v":1,"options":\["a\\sb","c\\:d"\]\} PRIVMSG #cantina :/)
+    expect(sent.slice(1).every((l) => l.startsWith('PRIVMSG'))).toBe(true)
+  })
+
+  it('drops the tags where message-tags was not granted', async () => {
+    const c = await connect(['echo-message'])
+    await c.sendText('#cantina', 'hello', { tags: { '+draft/reply': 'm1' } })
+    expect(server!.received).toContain('PRIVMSG #cantina :hello')
+  })
 })
 
 describe('staying connected', () => {
