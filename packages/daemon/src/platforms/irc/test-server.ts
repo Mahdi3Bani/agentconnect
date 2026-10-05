@@ -11,6 +11,8 @@ import net from 'node:net'
 export interface TestServerOptions {
   /** What the server advertises in CAP LS. Empty means a pre-IRCv3 network. */
   caps?: string[]
+  /** The ISUPPORT BOT mode letter, as Ergo advertises B. Absent means the network has no bot mode. */
+  botMode?: string
   members?: Record<string, string[]>
   channels?: { name: string; users: number; topic: string }[]
   /** Accept echo-message but never echo, to exercise the unconfirmed path. */
@@ -72,7 +74,9 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
       if (registered || nick === '*' || !userSent) return
       registered = true
       send(`:server 001 ${nick} :Welcome to the test network`)
-      send(`:server 005 ${nick} CHANTYPES=#& NETWORK=testnet :are supported`)
+      send(
+        `:server 005 ${nick} CHANTYPES=#& NETWORK=testnet${options.botMode ? ` BOT=${options.botMode}` : ''} :are supported`
+      )
       send(`:server 376 ${nick} :End of MOTD`)
     }
 

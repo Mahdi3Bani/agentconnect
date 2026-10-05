@@ -127,6 +127,18 @@ asserted -- you cannot ask Libera.Chat to stop supporting `message-tags`.
   declined with core's notice, which is now posted (it used to be dropped). A
   plain client that cannot send `+draft/reply` cannot answer: core only offers
   replies to a card.
+- **Bot mode**: where the server advertises ISUPPORT `BOT` (Ergo's is `B`), the
+  bot sets it on itself once ISUPPORT has been read (it arrives after 001). The
+  server then tags every line it sends with `bot`, which is how a client shows
+  it as a bot.
+- **Typing**: a turn shows as IRCv3 `+typing=active` (TAGMSG, refreshed every
+  3s) from its state's creation to `onSettle`, which are paired one to one;
+  admission is not, since a steered message joins a turn already running. Turns
+  sharing a target are counted, and `done` goes out when the last one ends. An
+  open card pauses it, since the agent is waiting on a person, and an answer
+  resumes it. A 15-minute backstop stops a turn that never settles from typing
+  forever. Not in `none` mode, and not without message-tags.
+- **Code blocks** keep their lines, each in monospace (`\x11`).
 - **Tool approvals** ride the same card, only where the agent allows chat
   approvals (`allowRuntimeChangesInChat`) and only the person who asked may
   answer, and only when logged in to a NickServ account (`chatApprover`):

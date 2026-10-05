@@ -3,6 +3,7 @@ import { fromMarkdown } from 'mdast-util-from-markdown'
 
 const BOLD = '\x02'
 const ITALIC = '\x1d'
+const MONO = '\x11'
 
 /** Agent markdown as IRC text: bold and italics become mIRC codes, links show their URL, code keeps its lines. */
 export function renderIrcText(markdown: string): string {
@@ -22,9 +23,10 @@ function block(node: RootContent, indent: string): string[] {
       return prefixLines(inline(node), indent)
     case 'heading':
       return prefixLines(`${BOLD}${inline(node)}${BOLD}`, indent)
-    // Fences are dropped but the lines are kept verbatim: IRC has no code block, and indentation still reads.
+    // Fences are dropped but the lines are kept verbatim, each in monospace (\x11): IRC has no code block, a client
+    // that draws monospace shows one, and one that does not still reads the indentation.
     case 'code':
-      return node.value.split('\n').map((line) => indent + line)
+      return node.value.split('\n').map((line) => indent + (line ? `${MONO}${line}${MONO}` : ''))
     case 'blockquote':
       return blocks(node.children, indent).map((line) => `> ${line}`)
     case 'list':

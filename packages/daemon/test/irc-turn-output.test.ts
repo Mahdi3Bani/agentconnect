@@ -33,8 +33,8 @@ describe('markdown to IRC', () => {
     )
   })
 
-  it('keeps code block lines verbatim and drops the fences', () => {
-    expect(renderIrcText('run:\n\n```sh\nnpm test\n  --watch\n```')).toBe('run:\nnpm test\n  --watch')
+  it('keeps code block lines verbatim, each in monospace, and drops the fences', () => {
+    expect(renderIrcText('run:\n\n```sh\nnpm test\n  --watch\n```')).toBe('run:\n\x11npm test\x11\n\x11  --watch\x11')
   })
 
   it('renders headings bold, and lists and quotes as their plain-text conventions', () => {
@@ -142,5 +142,36 @@ describe('applying IRC actions', () => {
     )
     expect(sent).toEqual([])
     expect(recorded).toEqual(['kept'])
+  })
+})
+
+describe('typing for the life of a turn', () => {
+  const ctx = (mode: string, calls: string[]) =>
+    ({
+      mode,
+      isDm: false,
+      message: { channel: '#dev', sender: { id: 'account:mahdi', name: 'mahdi' } },
+      egress: {
+        sendText: async () => [],
+        typingStart: (t: string) => void calls.push(`start ${t}`),
+        typingStop: (t: string) => void calls.push(`stop ${t}`)
+      }
+    }) as any
+
+  it('starts with the turn and stops at settlement', async () => {
+    const { createIrcTurnOutput } = await import('../src/platforms/irc/surface.js')
+    const surface = createIrcTurnOutput(async () => {})
+    const calls: string[] = []
+    const state = surface.initialTurnState(ctx('medium', calls))
+    expect(calls).toEqual(['start #dev'])
+    await surface.onSettle!({ turnState: state } as any)
+    expect(calls).toEqual(['start #dev', 'stop #dev'])
+  })
+
+  it('stays quiet in none mode, where the turn shows nothing at all', async () => {
+    const { initialIrcTurnState } = await import('../src/platforms/irc/turn-output.js')
+    const calls: string[] = []
+    initialIrcTurnState(ctx('none', calls))
+    expect(calls).toEqual([])
   })
 })

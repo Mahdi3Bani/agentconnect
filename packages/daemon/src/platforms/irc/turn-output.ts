@@ -32,6 +32,10 @@ export interface IrcReplyPort {
     text: string,
     options?: { maxLines?: number; tags?: Record<string, string> }
   ): Promise<IrcSendReceipt[]>
+  /** IRCv3 typing, best effort; absent on a port that cannot show it. */
+  typingStart?(target: string): void
+  typingStop?(target: string): void
+  typingPause?(target: string, paused: boolean): void
 }
 
 // IRC cannot edit or delete, so nothing streams: one final post, and progress only as rationed completed messages.
@@ -126,8 +130,11 @@ export interface IrcTurnState {
 }
 
 export function initialIrcTurnState(ctx: TurnOutputContext<NormalizedMessage>): IrcTurnState {
+  const conn = ctx.egress as IrcReplyPort | undefined
+  // Typing runs for the turn's life: started with its state, stopped by the surface's onSettle.
+  if (ctx.mode !== 'none') conn?.typingStart?.(ctx.message.channel)
   return {
-    conn: ctx.egress as IrcReplyPort | undefined,
+    conn,
     target: ctx.message.channel,
     isDm: ctx.isDm,
     ...(ctx.message.sender.name ? { askedBy: ctx.message.sender.name } : {})

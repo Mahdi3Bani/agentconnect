@@ -27,6 +27,8 @@ import { IrcFloodGate } from './flood.js'
 import { carryFormatting, IRC_FORMATTING_CARRY_BYTES } from './render.js'
 import { ircPayloadBudget, splitIrcText } from './split.js'
 
+/** The longest one turn may show as typing without a refresh from its own settlement. */
+const IRC_TYPING_MAX_MS = 15 * 60_000
 export interface IrcConnectionConfig {
   host: string
   port: number
@@ -138,6 +140,7 @@ export class IrcConnection implements PlatformConnection {
   private registered = false
   private reconnecting = false
   private nickAttempt = 0
+  private botModeSet = false
   private failStart?: (error: Error) => void
   private registrationOutcome?: (registered: boolean) => void
   private negotiated = new Set<string>()
@@ -152,6 +155,11 @@ export class IrcConnection implements PlatformConnection {
   private readonly invitedChannels = new Set<string>()
   // Sends awaiting their echo, FIFO per (target, text): the server echoes in the order it received them.
   private readonly awaitingEcho = new Map<string, EchoWaiter[]>()
+  /** IRCv3 typing per target: how many turns are working there, whether a card has them waiting, the refresh. */
+  private readonly typing = new Map<
+    string,
+    { turns: number; paused: boolean; timer?: ReturnType<typeof setInterval> }
+  >()
 
   constructor(
     private readonly config: IrcConnectionConfig,
@@ -171,6 +179,8 @@ export class IrcConnection implements PlatformConnection {
 
   async start(): Promise<void> {
     this.client.on('registered', () => this.onRegistered())
+    // ISUPPORT (005) arrives after the welcome, so bot mode is known only once it has been read.
+    this.client.on('server options', () => this.applyBotMode())
     this.client.on('nick in use', () => this.onNickInUse())
     this.client.on('socket close', () => this.onSocketClose())
     this.client.on('privmsg', (event: IrcFrameworkMessage) => this.onInbound('privmsg', event))
@@ -224,7 +234,22 @@ export class IrcConnection implements PlatformConnection {
       if (this.client.network?.cap?.isEnabled(cap)) this.negotiated.add(cap)
     }
     this.registrationOutcome?.(true)
+    this.botModeSet = false
+    this.applyBotMode()
     void this.joinChannels()
+  }
+
+  /**
+   * IRCv3 bot mode: where the server offers it (ISUPPORT BOT, Ergo's is B), it tags every message we send with `bot`,
+   * which is how a client knows to show this nick as a bot. Tried at registration and again once ISUPPORT is read,
+   * set once per connection.
+   */
+  private applyBotMode(): void {
+    if (!this.registered || this.botModeSet) return
+    const botMode = this.client.network?.supports?.('BOT')
+    if (typeof botMode !== 'string' || !/^[A-Za-z]$/.test(botMode)) return
+    this.botModeSet = true
+    this.client.raw(`MODE ${this.nick} +${botMode}`)
   }
 
   // Accepting an invite is how a bot is added to a channel on IRC; the configured list stays the durable one.
@@ -297,6 +322,8 @@ export class IrcConnection implements PlatformConnection {
   async stop(): Promise<void> {
     this.stopping = true
     this.registered = false
+    for (const entry of this.typing.values()) clearInterval(entry.timer)
+    this.typing.clear()
     for (const waiters of this.awaitingEcho.values()) for (const settle of waiters) settle(null)
     this.awaitingEcho.clear()
     this.client.quit('disconnecting')
@@ -430,6 +457,64 @@ export class IrcConnection implements PlatformConnection {
       return { id: receipt?.msgid ?? this.mintLocalId(), text: line, confirmed: receipt !== null }
     })
     return Promise.all(receipts)
+  }
+
+  // ── typing (IRCv3 +typing) ──
+  // A client shows "agentbot is working…" while `active` keeps arriving: the spec lets it lapse after 6s, and asks
+  // for no more than one notice every 3s. Several turns can share a target, so it is counted, and `done` goes out
+  // only when the last one ends. Nothing is sent where message-tags was not granted: TAGMSG needs it.
+
+  /** A turn started working in `target`. */
+  typingStart(target: string): void {
+    const entry = this.typing.get(target) ?? { turns: 0, paused: false }
+    entry.turns++
+    this.typing.set(target, entry)
+    if (!entry.timer && !entry.paused) this.typingRun(target, entry)
+  }
+
+  /** A turn in `target` ended. */
+  typingStop(target: string): void {
+    const entry = this.typing.get(target)
+    if (!entry) return
+    if (--entry.turns > 0) return
+    clearInterval(entry.timer)
+    this.typing.delete(target)
+    if (!entry.paused) this.sendTyping(target, 'done')
+  }
+
+  /** A question is waiting on a person in `target`: not working, so say so until it is answered. */
+  typingPause(target: string, paused: boolean): void {
+    const entry = this.typing.get(target)
+    if (!entry || entry.paused === paused) return
+    entry.paused = paused
+    if (paused) {
+      clearInterval(entry.timer)
+      entry.timer = undefined
+      this.sendTyping(target, 'done')
+    } else this.typingRun(target, entry)
+  }
+
+  private typingRun(target: string, entry: { timer?: ReturnType<typeof setInterval> }): void {
+    this.sendTyping(target, 'active')
+    // A backstop, never the plan: a turn that somehow never settles stops claiming to work after 15 minutes.
+    const until = this.now() + IRC_TYPING_MAX_MS
+    entry.timer = setInterval(() => {
+      if (this.now() < until) return this.sendTyping(target, 'active')
+      clearInterval(entry.timer)
+      entry.timer = undefined
+      this.sendTyping(target, 'done')
+    }, 3_000)
+    entry.timer.unref?.()
+  }
+
+  private sendTyping(target: string, state: 'active' | 'done'): void {
+    if (!this.registered || !this.negotiated.has('message-tags')) return
+    try {
+      assertIrcTarget(target)
+    } catch {
+      return
+    }
+    this.client.raw(`@+typing=${state} TAGMSG ${target}`)
   }
 
   /** CHANTYPES comes back as a string on some ircds and an array on others. */

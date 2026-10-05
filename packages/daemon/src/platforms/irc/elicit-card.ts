@@ -111,6 +111,12 @@ function follow(handle: ElicitCardHandle, text: string): void {
   void conn?.sendText?.(handle.channel, text, { maxLines: 1, tags: { '+draft/reply': handle.ts } }).catch(() => {})
 }
 
+// Answered: the agent goes back to work. A refused answer (core re-validates) leaves it showing as working until
+// the turn settles, which is the honest side to err on.
+function resumeTyping(handle: ElicitCardHandle): void {
+  ;(handle.conn as Partial<IrcReplyPort> | undefined)?.typingPause?.(handle.channel, false)
+}
+
 export const ircElicitCards: ElicitCardFacet = {
   platform: 'irc',
   reduction: IRC_ELICIT_SURFACE,
@@ -141,7 +147,10 @@ export const ircElicitCards: ElicitCardFacet = {
       })
       // An answer is a reply to the card's msgid. Without one from the server nothing could ever answer it, so the
       // card counts as refused rather than left open forever.
-      return first && !first.id.startsWith('local-') ? first.id : undefined
+      if (!first || first.id.startsWith('local-')) return undefined
+      // The agent is waiting on a person now, not working.
+      conn.typingPause?.(target, true)
+      return first.id
     })
   },
 
@@ -153,10 +162,15 @@ export const ircElicitCards: ElicitCardFacet = {
     if (!shape) return null
     const { select, typed } = shape
     const picked = select ? ircElicitChoice(select.target, reply.text) : null
-    if (select && picked !== null)
+    if (select && picked !== null) {
+      resumeTyping(handle)
       return { kind: 'submit', fields: { [elicitFormBlockId(select.index)]: elicitOptionToken(picked) } }
+    }
     const said = reply.text.trim()
-    if (typed && said) return { kind: 'submit', fields: { [elicitFormBlockId(typed.index)]: said } }
+    if (typed && said) {
+      resumeTyping(handle)
+      return { kind: 'submit', fields: { [elicitFormBlockId(typed.index)]: said } }
+    }
     follow(
       handle,
       select ? `Reply with a number from 1 to ${select.target.options.length}.` : 'Reply with your answer.'

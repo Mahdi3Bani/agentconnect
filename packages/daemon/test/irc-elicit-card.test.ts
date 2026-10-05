@@ -53,11 +53,13 @@ function ircTurn(isDm = false, opts: { requesterId?: string; chatApprovals?: boo
   }
   if (opts.chatApprovals) daemon.agents.set('agent-1', { id: 'agent-1', allowRuntimeChangesInChat: true })
   const sent: Sent[] = []
+  const pauses: Array<[string, boolean]> = []
   const conn = {
     sendText: async (target: string, text: string, options?: Sent['options']) => {
       sent.push({ target, text, ...(options ? { options } : {}) })
       return [{ id: `srv${sent.length}`, text, confirmed: true }]
-    }
+    },
+    typingPause: (target: string, paused: boolean) => void pauses.push([target, paused])
   }
   const channel = isDm ? 'mahdi' : '#dev'
   daemon.pending.set(JSON.stringify(['agent-1', 's1']), {
@@ -89,7 +91,7 @@ function ircTurn(isDm = false, opts: { requesterId?: string; chatApprovals?: boo
   })
   const applied: any[] = []
   daemon.enqueueApply = (_p: any, action: any) => void applied.push(action)
-  return { daemon, sent, applied }
+  return { daemon, sent, applied, pauses }
 }
 
 const reply = (text: string, replyTo?: string, conversation = CONVERSATION) => ({
@@ -133,6 +135,19 @@ describe('an IRC turn collects an elicitation answer from a reply', () => {
         options: { maxLines: 1, tags: { '+draft/reply': 'srv1' } }
       })
     )
+  })
+
+  it('shows the agent waiting, not working, until the card is answered', async () => {
+    const h = ircTurn()
+    await raise(h, form(BRANCH, ['branch']))
+    expect(h.pauses).toEqual([['#dev', true]])
+    await h.daemon.permissions.claimElicitReply(reply('maybe', 'srv1'))
+    expect(h.pauses).toEqual([['#dev', true]])
+    await h.daemon.permissions.claimElicitReply(reply('1', 'srv1'))
+    expect(h.pauses).toEqual([
+      ['#dev', true],
+      ['#dev', false]
+    ])
   })
 
   it('takes a typed number replying to the card', async () => {

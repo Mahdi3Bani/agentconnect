@@ -320,3 +320,65 @@ describe('SASL', () => {
     expect(server.authenticated).toEqual(['r2d2'])
   })
 })
+
+describe('bot mode', () => {
+  it('sets the mode the server offers for bots, so it tags our messages as a bot', async () => {
+    await connect(undefined, { botMode: 'B' })
+    await vi.waitFor(() => expect(server!.received).toContain('MODE agentconnect +B'))
+  })
+
+  it('sets nothing on a network without one', async () => {
+    await connect()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(server!.received.some((l) => l.startsWith('MODE agentconnect'))).toBe(false)
+  })
+})
+
+describe('typing', () => {
+  const typing = () => server!.received.filter((l) => l.includes('TAGMSG'))
+
+  it('says active while a turn works, refreshing, and done when the last one ends', async () => {
+    const c = await connect()
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      c.typingStart('#cantina')
+      c.typingStart('#cantina')
+      await vi.waitFor(() => expect(typing()).toEqual(['@+typing=active TAGMSG #cantina']))
+      vi.advanceTimersByTime(3_000)
+      await vi.waitFor(() => expect(typing()).toHaveLength(2))
+      // One of two turns ending is not the end of the typing.
+      c.typingStop('#cantina')
+      c.typingStop('#cantina')
+      await vi.waitFor(() => expect(typing().at(-1)).toBe('@+typing=done TAGMSG #cantina'))
+      const sent = typing().length
+      vi.advanceTimersByTime(9_000)
+      await new Promise((r) => setTimeout(r, 20))
+      expect(typing()).toHaveLength(sent)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('goes quiet while a question waits on a person, and resumes once answered', async () => {
+    const c = await connect()
+    c.typingStart('#cantina')
+    c.typingPause('#cantina', true)
+    c.typingPause('#cantina', false)
+    await vi.waitFor(() =>
+      expect(typing()).toEqual([
+        '@+typing=active TAGMSG #cantina',
+        '@+typing=done TAGMSG #cantina',
+        '@+typing=active TAGMSG #cantina'
+      ])
+    )
+    c.typingStop('#cantina')
+  })
+
+  it('sends nothing where message-tags was not granted', async () => {
+    const c = await connect(['echo-message'])
+    c.typingStart('#cantina')
+    c.typingStop('#cantina')
+    await new Promise((r) => setTimeout(r, 50))
+    expect(typing()).toEqual([])
+  })
+})
