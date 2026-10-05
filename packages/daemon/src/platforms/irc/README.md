@@ -114,17 +114,26 @@ asserted -- you cannot ask Libera.Chat to stop supporting `message-tags`.
   (irc-framework drops it silently). A taken nick falls back to `nick_`,
   `nick__`, `nick3`...; mentions follow the nick actually held.
 
-- **Elicitation cards** (`elicit-card.ts`): a one-field enum or boolean ask is
-  posted as `nick: question [1] a [2] b (reply to this with a number)`, and a
-  reply to it (`+draft/reply`) naming a number or label answers it. The options
-  also ride a `+mosircley.de/card` client tag, so MosIrcley draws them as
-  buttons; a tap is the same reply, with the label as its text (format:
-  MosIrcley's `docs/agent-cards.md`). IRC cannot edit, so the verdict is a
-  line threaded under the card. A server that assigns no msgid leaves nothing
-  to reply to, so the card counts as refused. Typed and multi-field asks are
-  still declined with core's notice, which is now posted (it used to be
-  dropped). A plain client that cannot send `+draft/reply` cannot answer: core
-  only offers replies to a card.
+- **Elicitation cards** (`elicit-card.ts`): one reply answers the card, so it
+  takes three shapes — a single select (`[1] a [2] b`), a typed question, and
+  a select with its own free-text box (Claude Code's AskUserQuestion: a
+  number, a label, or your own words). A reply to the card (`+draft/reply`)
+  answers it; a pick wins over the box. The options also ride a
+  `+mosircley.de/card` client tag, so MosIrcley draws them as buttons; a tap is
+  the same reply, with the label as its text (format: MosIrcley's
+  `docs/agent-cards.md`). IRC cannot edit, so the verdict is a line threaded
+  under the card. A server that assigns no msgid leaves nothing to reply to, so
+  the card counts as refused. Multi-selects and several questions are still
+  declined with core's notice, which is now posted (it used to be dropped). A
+  plain client that cannot send `+draft/reply` cannot answer: core only offers
+  replies to a card.
+- **Tool approvals** ride the same card, only where the agent allows chat
+  approvals (`allowRuntimeChangesInChat`) and only the person who asked may
+  answer, and only when logged in to a NickServ account (`chatApprover`):
+  anyone can take a nick, so a nick alone is not an identity. Anyone else's
+  answer is refused aloud and the card stays open. An asker with no account
+  leaves the request with the Agent editors, as before. The durable row
+  records what was picked, so Deny is `denied`.
 
 Not built yet: reclaiming the configured nick after a fallback (NickServ
 REGAIN).

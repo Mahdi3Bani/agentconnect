@@ -37,9 +37,10 @@ const IRC_ELICIT_MARK: Record<ElicitCardMark, string> = {
   blocked: '🔒'
 }
 
-// Only the kinds one reply answers whole; typed and multi-field asks keep the decline notice.
+// The kinds one reply answers whole. Which COMBINATIONS a card takes is ircCardShape's call; any other form, a
+// multi-select or several questions, is refused by build and keeps core's decline notice.
 export const IRC_ELICIT_SURFACE: ElicitSurface = {
-  kinds: new Set<ElicitKind>(['enum', 'boolean']),
+  kinds: new Set<ElicitKind>(['enum', 'boolean', 'text', 'number']),
   optionLimits: {
     enum: { maxOptions: IRC_CARD_MAX_OPTIONS }
   }
@@ -54,10 +55,41 @@ function cardLabel(label: string): string {
   return clampTo(label.replace(/[\r\n]+/g, ' '), IRC_CARD_MAX_LABEL)
 }
 
-/** The card's words: the question, then the numbered options on the same line, then how to answer. */
-export function ircElicitText(message: string, target: ElicitTarget): string {
-  const options = target.options.map((o, i) => `[${i + 1}] ${cardLabel(o.label)}`).join(' ')
-  return `${message.trim()} ${options} (reply to this with a number)`
+/**
+ * What one reply can answer: a pick from options, a typed answer, or both — a select with its own free-text box,
+ * which is the shape of Claude Code's AskUserQuestion ("pick one, or type your own"). Positions are the form's own,
+ * so an answer is keyed as core keys a Confirm. Null for any other form.
+ */
+export interface IrcCardShape {
+  select?: { target: ElicitTarget; index: number }
+  typed?: { target: ElicitTarget; index: number }
+}
+
+export function ircCardShape(form: readonly ElicitTarget[]): IrcCardShape | null {
+  const isSelect = (t: ElicitTarget) => (t.kind === 'enum' || t.kind === 'boolean') && t.options.length > 0
+  const isTyped = (t: ElicitTarget) => t.kind === 'text' || t.kind === 'number'
+  if (form.length === 1) {
+    const [only] = form
+    if (isSelect(only!)) return { select: { target: only!, index: 0 } }
+    if (isTyped(only!)) return { typed: { target: only!, index: 0 } }
+    return null
+  }
+  if (form.length !== 2) return null
+  const s = form.findIndex(isSelect)
+  const t = form.findIndex((f) => f.kind === 'text' && f.customAnswerFor !== undefined)
+  if (s < 0 || t < 0 || form[t]!.customAnswerFor !== form[s]!.propName) return null
+  return { select: { target: form[s]!, index: s }, typed: { target: form[t]!, index: t } }
+}
+
+/** The card's words: the question, then any numbered options on the same line, then how to answer. */
+export function ircElicitText(message: string, shape: IrcCardShape): string {
+  const options = shape.select?.target.options.map((o, i) => `[${i + 1}] ${cardLabel(o.label)}`).join(' ')
+  const how = shape.select
+    ? shape.typed
+      ? 'reply to this with a number, or your own answer'
+      : 'reply to this with a number'
+    : 'reply to this with your answer'
+  return [message.trim(), options, `(${how})`].filter(Boolean).join(' ')
 }
 
 /** The option a reply names: its 1-based number, or its label or value — the button label MosIrcley sends too. */
@@ -84,14 +116,14 @@ export const ircElicitCards: ElicitCardFacet = {
   reduction: IRC_ELICIT_SURFACE,
 
   build(host: ElicitCardHost, turn: ElicitCardTurn, ask: ElicitCardAsk): ElicitCardDraft | null {
-    const target = ask.form?.length === 1 ? ask.form[0]! : undefined
-    if (ask.url || !target?.options.length) return null
+    const shape = ask.form && !ask.url ? ircCardShape(ask.form) : null
+    if (!shape) return null
     const state = host.turnState(turn) as IrcTurnState
     // `nick: text` is how a channel line says who it is for, as the turn's answer does.
     const address = !state.isDm && state.askedBy ? `${state.askedBy}: ` : ''
     const draft: IrcCardDraft = {
-      text: address + ircElicitText(ask.message, target),
-      labels: target.options.map((o) => cardLabel(o.label))
+      text: address + ircElicitText(ask.message, shape),
+      labels: shape.select?.target.options.map((o) => cardLabel(o.label)) ?? []
     }
     return draft
   },
@@ -104,7 +136,8 @@ export const ircElicitCards: ElicitCardFacet = {
     return await host.postCardSerialized(turn, async () => {
       const [first] = await conn.sendText(target, text, {
         maxLines: isDm ? IRC_MAX_ANSWER_LINES.dm : IRC_MAX_ANSWER_LINES.channel,
-        tags: { [IRC_CARD_TAG]: JSON.stringify({ v: 1, options: labels }) }
+        // A typed question has no buttons, so no card tag: a client shows it as the message it is.
+        ...(labels.length ? { tags: { [IRC_CARD_TAG]: JSON.stringify({ v: 1, options: labels }) } } : {})
       })
       // An answer is a reply to the card's msgid. Without one from the server nothing could ever answer it, so the
       // card counts as refused rather than left open forever.
@@ -112,17 +145,28 @@ export const ircElicitCards: ElicitCardFacet = {
     })
   },
 
-  // Only a reply to THIS card answers it; a reply that names no option gets the instruction again.
+  // Only a reply to THIS card answers it. A pick wins over the typed box, so "2" is an option, not the text "2";
+  // a reply that is neither gets the instruction again. A typed answer is validated by core, as a Confirm's is.
   claimReply(handle: ElicitCardHandle, card: ElicitCardTapTarget, reply: ElicitCardReply): ElicitCardTap | null {
     if (handle.ts === undefined || reply.replyTo !== handle.ts) return null
-    const target = card.form.length === 1 ? card.form[0]! : undefined
-    if (!target) return null
-    const index = ircElicitChoice(target, reply.text)
-    if (index === null) {
-      follow(handle, `Reply with a number from 1 to ${target.options.length}.`)
-      return { kind: 'pending' }
-    }
-    return { kind: 'submit', fields: { [elicitFormBlockId(0)]: elicitOptionToken(index) } }
+    const shape = ircCardShape(card.form)
+    if (!shape) return null
+    const { select, typed } = shape
+    const picked = select ? ircElicitChoice(select.target, reply.text) : null
+    if (select && picked !== null)
+      return { kind: 'submit', fields: { [elicitFormBlockId(select.index)]: elicitOptionToken(picked) } }
+    const said = reply.text.trim()
+    if (typed && said) return { kind: 'submit', fields: { [elicitFormBlockId(typed.index)]: said } }
+    follow(
+      handle,
+      select ? `Reply with a number from 1 to ${select.target.options.length}.` : 'Reply with your answer.'
+    )
+    return { kind: 'pending' }
+  },
+
+  // Anyone can take a nick, so only a NickServ account is an identity: the asker approves, and only when logged in.
+  chatApprover(requesterId: string | undefined): string | null {
+    return requesterId?.startsWith('account:') ? requesterId : null
   },
 
   // IRC cannot edit the card, so the verdict is a reply to it.

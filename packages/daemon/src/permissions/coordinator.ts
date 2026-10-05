@@ -86,6 +86,7 @@ import {
   permissionRequestParts,
   type ApprovalRequestParts
 } from '../daemon/tool-classification.js'
+import { allowingOptionIds, permissionElicitation, permissionOptionFrom } from './permission-elicitation.js'
 import { pendingTurnKey, turnState, type DaemonRenderAction, type Pending } from '../daemon/turn-types.js'
 import { isSyntheticA2aChannel } from '../cp/cp-collab-routes.js'
 import type { MemoryWriteAsk } from '../mcp/ops/memory.js'
@@ -227,6 +228,8 @@ const ELICIT_CANCELLED: ElicitCardLabel = { mark: 'waiting', text: 'Cancelled', 
 
 /** How a card is re-labelled once chat approval is no longer allowed: the ask is still open, but
  *  only an Agent editor can settle it now. */
+const ELICIT_APPROVER_ONLY = 'Only the person who asked, logged in to their account, can answer this.'
+
 const ELICIT_EDITOR_ONLY: ElicitCardLabel = {
   mark: 'blocked',
   text: 'Ask an Agent editor to allow it',
@@ -278,6 +281,11 @@ type PendingElicit = PendingElicitSurface & {
    *  approval elicitation, whose durable record is `permission_requests`. */
   row?: ElicitRow
   approval: boolean
+  /** Set when the surface narrowed WHO may answer this approval (`chatApprover`): only this actor id. */
+  approver?: string
+  /** Set on a tool approval asked as a card: the option values that grant. Absent ⇒ any answer is a grant,
+   *  which is what an MCP approval elicitation's Accept is. */
+  allowingOptions?: ReadonlySet<string>
   resolve: (res: CreateElicitationResponse) => void
 }
 
@@ -1443,9 +1451,50 @@ export class PermissionCoordinator {
     if (chatApprovalEnabled) {
       return await this.awaitChatPermission(agentId, sessionId, params, evaluationParams, p)
     }
+    // A surface without a permission card of its own can still take the approval on its elicitation card,
+    // when it says whose answer it can trust; an untrusted asker leaves the request with the editors.
+    const facet =
+      this.host.agents().get(agentId)?.allowRuntimeChangesInChat === true &&
+      !p.plan.approvalSurfaceSuppressed &&
+      params.options.length > 0 &&
+      (p.conn ?? p.egress)
+        ? this.host.elicitCardFacet(p.plan.platform)
+        : undefined
+    const approver = facet?.chatApprover?.(p.entry.msg.sender?.id)
+    if (facet && approver) {
+      return await this.awaitCardPermission(agentId, sessionId, params, evaluationParams, p, facet, approver)
+    }
     // Default policy: hold the runtime request and surface only a neutral notice
     // in chat. The bounded, masked request is decided by an Agent editor.
     return await this.awaitEditorPermission(agentId, sessionId, params, evaluationParams, p)
+  }
+
+  /** A tool approval on a surface's elicitation card: the options as one single-select, answerable only by
+   *  `approver`. Anything but a picked option — a dismissal, the turn ending, a card that never posted — cancels. */
+  private async awaitCardPermission(
+    agentId: string,
+    sessionId: string,
+    params: RequestPermissionRequest,
+    evaluationParams: RequestPermissionRequest,
+    p: Pending,
+    facet: ElicitCardFacet,
+    approver: string
+  ): Promise<RequestPermissionResponse> {
+    const ask = permissionElicitation(params)
+    const form = elicitForm(ask, facet.reduction)
+    if (!form || elicitCardShape(form) === 'inputs')
+      return await this.awaitEditorPermission(agentId, sessionId, params, evaluationParams, p)
+    const res = await this.awaitChatElicitation(agentId, sessionId, ask, p, facet, { form }, true, {
+      parts: permissionRequestParts(params),
+      approver,
+      allowingOptions: allowingOptionIds(params)
+    })
+    const option = permissionOptionFrom(params, res)
+    if (!option) {
+      this.permissionEvaluationDetails.set(evaluationParams, { reason: 'permission_card_unanswered' })
+      return { outcome: { outcome: 'cancelled' } }
+    }
+    return { outcome: { outcome: 'selected', optionId: option.optionId } }
   }
 
   /** Grant one of this daemon's own tools without a card; undefined when the runtime offered no allow option. */
@@ -1604,7 +1653,8 @@ export class PermissionCoordinator {
     p: Pending,
     facet: ElicitCardFacet,
     shape: { form?: ElicitTarget[]; url?: { elicitationId: string; url: string } },
-    isApproval: boolean
+    isApproval: boolean,
+    approval: { parts?: ApprovalRequestParts; approver?: string; allowingOptions?: ReadonlySet<string> } = {}
   ): Promise<CreateElicitationResponse | undefined> {
     const { form, url } = shape
     const requestId = randomUUID()
@@ -1637,6 +1687,8 @@ export class PermissionCoordinator {
       ...(inputs && form ? { form } : {}),
       ...(url ? { url } : {}),
       approval: isApproval,
+      ...(approval.approver !== undefined ? { approver: approval.approver } : {}),
+      ...(approval.allowingOptions ? { allowingOptions: approval.allowingOptions } : {}),
       surface: 'chat',
       facet,
       conn: p.conn ?? p.egress,
@@ -1662,7 +1714,7 @@ export class PermissionCoordinator {
         requestId,
         agentId,
         sessionId,
-        elicitationApprovalParts(params),
+        approval.parts ?? elicitationApprovalParts(params),
         p,
         false
       )
@@ -2255,6 +2307,12 @@ export class PermissionCoordinator {
       if (rec.surface === 'chat') rec.facet.settle(rec, elicitSettlement(rec.params, false, ELICIT_EDITOR_ONLY))
       return
     }
+    // Someone other than the one approver: refused aloud, recorded as an attempt, and the card stays open.
+    if (rec.approver !== undefined && a.actor?.userId !== rec.approver) {
+      this.host.logSessionAction('permission (refused: not the approver)', rec.sessionId, a.actor)
+      this.noticeInTurn(rec, ELICIT_APPROVER_ONLY)
+      return
+    }
     let res: CreateElicitationResponse
     let mark: ElicitCardMark
     // What the settled card says the answer WAS — the webchat label, and the decision's own tail.
@@ -2288,6 +2346,9 @@ export class PermissionCoordinator {
       mark = 'answered'
       decisionText = rec.kind === 'boolean' ? (value ? 'Yes' : 'No') : String(answer)
     }
+    // A picked option grants only if it is one of the granting ones; a bare Accept always does.
+    const granted =
+      answer !== null && (!rec.allowingOptions || (typeof answer === 'string' && rec.allowingOptions.has(answer)))
     if (rec.approval) {
       // A chat approval's actor id is scoped the way its own surface scopes one (undefined where
       // the surface's ids are already global), so a recorded resolver is unique either way.
@@ -2295,18 +2356,11 @@ export class PermissionCoordinator {
       const by = a.actor
         ? { resolvedBy: team ? `slack:${team}:${a.actor.userId}` : null, resolvedByName: a.actor.name ?? null }
         : undefined
-      if (
-        !(await this.resolveStoredPermissionRequest(
-          rec.agentId,
-          a.requestId,
-          answer === null ? 'denied' : 'allowed',
-          by
-        ))
-      )
+      if (!(await this.resolveStoredPermissionRequest(rec.agentId, a.requestId, granted ? 'allowed' : 'denied', by)))
         return
     }
     this.pendingElicits.delete(a.requestId)
-    this.syncApprovalActivity(rec.owner, rec.sessionId, { id: a.requestId, allowed: answer !== null })
+    this.syncApprovalActivity(rec.owner, rec.sessionId, { id: a.requestId, allowed: granted })
     const outcome = answer === null ? 'dismissed' : 'accepted'
     this.settleElicitRow(rec, outcome, answered)
     if (rec.surface === 'webchat') {

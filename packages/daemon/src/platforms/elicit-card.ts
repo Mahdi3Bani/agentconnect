@@ -205,4 +205,10 @@ export interface ElicitCardFacet {
    *  resolver so it is globally unique. Absent where the surface's user ids already are — a
    *  Telegram user id names one account across every chat, a Slack one only within its workspace. */
   answerScope?(handle: ElicitCardHandle): string | undefined
+  /** Who may answer a TOOL APPROVAL card on this surface, given the id of the person whose message
+   *  started the turn: that id, or another this surface can vouch for. Null ⇒ nobody here can be
+   *  trusted to, and the request takes the Agent-editor queue as it would without a card. Absent ⇒
+   *  this surface takes no tool approvals at all. Still behind the agent's
+   *  `allowRuntimeChangesInChat`; this narrows WHO, never whether. */
+  chatApprover?(requesterId: string | undefined): string | null
 }
