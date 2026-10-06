@@ -10,12 +10,30 @@ import { permissionRequestParts } from '../daemon/tool-classification.js'
 
 export const PERMISSION_CARD_PROP = 'decision'
 
-export function permissionElicitation(params: RequestPermissionRequest): CreateElicitationRequest {
+// What the agent wants to do, by the ACP tool kind; anything else is just a tool.
+const PERMISSION_ACTION: Partial<Record<string, string>> = {
+  read: 'read a file',
+  edit: 'edit a file',
+  delete: 'delete a file',
+  move: 'move a file',
+  search: 'search',
+  execute: 'run a command',
+  fetch: 'fetch a web page'
+}
+
+/** The approval's one line. A runtime that titles a call with its own input (OpenCode titles an edit with its path) says it once. */
+export function permissionMessage(params: RequestPermissionRequest): string {
   const { tool, detail } = permissionRequestParts(params)
+  const action = PERMISSION_ACTION[params.toolCall?.kind ?? ''] ?? 'use a tool'
+  const what = !detail || tool.includes(detail) ? tool : detail.includes(tool) ? detail : `${tool}: ${detail}`
+  return `🔒 The agent wants to ${action}: ${what}`
+}
+
+export function permissionElicitation(params: RequestPermissionRequest): CreateElicitationRequest {
   return {
     sessionId: params.sessionId,
     mode: 'form',
-    message: `🔒 The agent wants to run ${detail ? `${tool}: ${detail}` : tool}`,
+    message: permissionMessage(params),
     requestedSchema: {
       type: 'object',
       properties: {

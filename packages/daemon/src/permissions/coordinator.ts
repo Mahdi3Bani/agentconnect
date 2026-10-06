@@ -2344,7 +2344,9 @@ export class PermissionCoordinator {
       res = { action: 'accept', content: { [rec.propName]: value } }
       answered = chosenLabel(target, answer)
       mark = 'answered'
-      decisionText = rec.kind === 'boolean' ? (value ? 'Yes' : 'No') : String(answer)
+      // An approval's value is the runtime's option id ("once"); its button said "Allow once".
+      decisionText =
+        rec.kind === 'boolean' ? (value ? 'Yes' : 'No') : rec.approval ? (answered ?? String(answer)) : String(answer)
     }
     // A picked option grants only if it is one of the granting ones; a bare Accept always does.
     const granted =

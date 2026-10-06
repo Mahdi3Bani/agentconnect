@@ -28,6 +28,7 @@ export const IRC_CARD_TAG = '+mosircley.de/card'
 // The card tag's own limits: a client drops a card that breaks them, leaving only the text.
 const IRC_CARD_MAX_OPTIONS = 12
 const IRC_CARD_MAX_LABEL = 80
+const IRC_CARD_MAX_TEXT = 1000
 const IRC_DECISION_CAP = 300
 
 const IRC_ELICIT_MARK: Record<ElicitCardMark, string> = {
@@ -49,6 +50,8 @@ export const IRC_ELICIT_SURFACE: ElicitSurface = {
 interface IrcCardDraft {
   text: string
   labels: string[]
+  /** The question without the numbered options, for a client that draws them as buttons instead */
+  question: string
 }
 
 function cardLabel(label: string): string {
@@ -92,6 +95,11 @@ export function ircElicitText(message: string, shape: IrcCardShape): string {
   return [message.trim(), options, `(${how})`].filter(Boolean).join(' ')
 }
 
+/** The card tag's own words: the question alone, since the options are buttons there; a typed answer still needs saying. */
+export function ircCardQuestion(message: string, shape: IrcCardShape): string {
+  return [message.trim(), shape.typed ? '(or reply to this with your own answer)' : ''].filter(Boolean).join(' ')
+}
+
 /** The option a reply names: its 1-based number, or its label or value — the button label MosIrcley sends too. */
 export function ircElicitChoice(target: ElicitTarget, text: string): number | null {
   const said = text.normalize('NFKC').trim().toLowerCase()
@@ -129,7 +137,8 @@ export const ircElicitCards: ElicitCardFacet = {
     const address = !state.isDm && state.askedBy ? `${state.askedBy}: ` : ''
     const draft: IrcCardDraft = {
       text: address + ircElicitText(ask.message, shape),
-      labels: shape.select?.target.options.map((o) => cardLabel(o.label)) ?? []
+      labels: shape.select?.target.options.map((o) => cardLabel(o.label)) ?? [],
+      question: clampTo(address + ircCardQuestion(ask.message, shape), IRC_CARD_MAX_TEXT)
     }
     return draft
   },
@@ -138,12 +147,14 @@ export const ircElicitCards: ElicitCardFacet = {
     const state = host.turnState(turn) as IrcTurnState
     const { conn, target, isDm } = state
     if (!conn) return undefined
-    const { text, labels } = draft as IrcCardDraft
+    const { text, labels, question } = draft as IrcCardDraft
     return await host.postCardSerialized(turn, async () => {
       const [first] = await conn.sendText(target, text, {
         maxLines: isDm ? IRC_MAX_ANSWER_LINES.dm : IRC_MAX_ANSWER_LINES.channel,
         // A typed question has no buttons, so no card tag: a client shows it as the message it is.
-        ...(labels.length ? { tags: { [IRC_CARD_TAG]: JSON.stringify({ v: 1, options: labels }) } } : {})
+        ...(labels.length
+          ? { tags: { [IRC_CARD_TAG]: JSON.stringify({ v: 1, options: labels, text: question }) } }
+          : {})
       })
       // An answer is a reply to the card's msgid. Without one from the server nothing could ever answer it, so the
       // card counts as refused rather than left open forever.

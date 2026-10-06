@@ -121,7 +121,8 @@ asserted -- you cannot ask Libera.Chat to stop supporting `message-tags`.
   answers it; a pick wins over the box. The options also ride a
   `+mosircley.de/card` client tag, so MosIrcley draws them as buttons; a tap is
   the same reply, with the label as its text (format: MosIrcley's
-  `docs/agent-cards.md`). IRC cannot edit, so the verdict is a line threaded
+  `docs/agent-cards.md`). The tag's `text` is the question alone, so MosIrcley
+  shows it without the numbered options it already draws. IRC cannot edit, so the verdict is a line threaded
   under the card. A server that assigns no msgid leaves nothing to reply to, so
   the card counts as refused. Multi-selects and several questions are still
   declined with core's notice, which is now posted (it used to be dropped). A

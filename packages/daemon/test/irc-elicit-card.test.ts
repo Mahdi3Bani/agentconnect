@@ -8,6 +8,7 @@ import { fakeSlackAppFactory } from './fakes/slack-app.js'
 import { elicitForm } from '../src/slack/render.js'
 import { IRC_ELICIT_SURFACE, ircElicitChoice, ircElicitText } from '../src/platforms/irc/elicit-card.js'
 import { applyIrcAction, type IrcTurnState } from '../src/platforms/irc/turn-output.js'
+import { permissionMessage } from '../src/permissions/permission-elicitation.js'
 
 function form(properties: Record<string, unknown>, required: string[] = []): CreateElicitationRequest {
   return {
@@ -117,7 +118,17 @@ describe('an IRC turn collects an elicitation answer from a reply', () => {
       {
         target: '#dev',
         text: `mahdi: ${ircElicitText('Which branch should I cut from?', { select: { target: target(), index: 0 } })}`,
-        options: { maxLines: 12, tags: { '+mosircley.de/card': '{"v":1,"options":["main","develop"]}' } }
+        options: {
+          maxLines: 12,
+          // The tag carries the question alone, for a client that draws the options as buttons.
+          tags: {
+            '+mosircley.de/card': JSON.stringify({
+              v: 1,
+              options: ['main', 'develop'],
+              text: 'mahdi: Which branch should I cut from?'
+            })
+          }
+        }
       }
     ])
   })
@@ -203,8 +214,14 @@ describe('an IRC turn collects an elicitation answer from a reply', () => {
     expect(h.sent[0]!.text).toBe(
       'mahdi: Which branch should I cut from? [1] main [2] develop (reply to this with a number, or your own answer)'
     )
-    // Buttons for the options; the free text is a reply.
-    expect(h.sent[0]!.options?.tags).toEqual({ '+mosircley.de/card': '{"v":1,"options":["main","develop"]}' })
+    // Buttons for the options; the free text is a reply, which the card's own words still say.
+    expect(h.sent[0]!.options?.tags).toEqual({
+      '+mosircley.de/card': JSON.stringify({
+        v: 1,
+        options: ['main', 'develop'],
+        text: 'mahdi: Which branch should I cut from? (or reply to this with your own answer)'
+      })
+    })
     expect(await h.daemon.permissions.claimElicitReply(reply('release/2.4', 'srv1'))).toBe(true)
     await expect(result).resolves.toEqual({ action: 'accept', content: { other: 'release/2.4' } })
 
@@ -243,9 +260,10 @@ describe('a notice', () => {
 
 const BASH = {
   sessionId: 's1',
-  toolCall: { toolCallId: 'call-1', title: 'Bash', rawInput: { command: 'npm test' } },
+  toolCall: { toolCallId: 'call-1', title: 'Bash', kind: 'execute', rawInput: { command: 'npm test' } },
   options: [
-    { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+    // An id that is not its label, as OpenCode's "once" is "Allow once": the verdict names the label.
+    { optionId: 'once', name: 'Allow', kind: 'allow_once' },
     { optionId: 'always', name: 'Always allow', kind: 'allow_always' },
     { optionId: 'reject', name: 'Deny', kind: 'reject_once' }
   ]
@@ -260,16 +278,38 @@ async function ask(h: ReturnType<typeof ircTurn>) {
 }
 
 describe('a tool approval on IRC', () => {
+  it('says what kind of thing the agent wants to do, and the path once when the title is the input', () => {
+    const edit = (title: string, rawInput: unknown) =>
+      permissionMessage({ ...BASH, toolCall: { toolCallId: 'c', title, kind: 'edit', rawInput } } as never)
+    // OpenCode titles an edit with its path, and its input is that path too.
+    expect(edit('/w/hello2.txt', { filepath: '/w/hello2.txt' })).toBe(
+      '🔒 The agent wants to edit a file: /w/hello2.txt'
+    )
+    expect(edit('Write', { file_path: '/w/a.txt' })).toBe('🔒 The agent wants to edit a file: Write: /w/a.txt')
+    expect(permissionMessage({ ...BASH, toolCall: { toolCallId: 'c', title: 'mcp__x' } } as never)).toBe(
+      '🔒 The agent wants to use a tool: mcp__x'
+    )
+  })
+
   it('asks the logged-in asker on a card, and their Allow runs it', async () => {
     const h = ircTurn(false, { requesterId: ME, chatApprovals: true })
     const { decided } = await ask(h)
     expect(h.sent[0]).toMatchObject({
       target: '#dev',
-      text: 'mahdi: 🔒 The agent wants to run Bash: npm test [1] Allow [2] Always allow [3] Deny (reply to this with a number)',
-      options: { tags: { '+mosircley.de/card': '{"v":1,"options":["Allow","Always allow","Deny"]}' } }
+      text: 'mahdi: 🔒 The agent wants to run a command: Bash: npm test [1] Allow [2] Always allow [3] Deny (reply to this with a number)',
+      options: {
+        tags: {
+          '+mosircley.de/card': JSON.stringify({
+            v: 1,
+            options: ['Allow', 'Always allow', 'Deny'],
+            text: 'mahdi: 🔒 The agent wants to run a command: Bash: npm test'
+          })
+        }
+      }
     })
     expect(await h.daemon.permissions.claimElicitReply({ ...reply('Allow', 'srv1'), actor: { userId: ME } })).toBe(true)
-    await expect(decided).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } })
+    await expect(decided).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'once' } })
+    await vi.waitFor(() => expect(h.sent.map((m) => m.text)).toContain('✅ Allow'))
     // The console's durable row is written with the tool, and resolved as what was picked.
     expect(h.daemon.store.createPermissionRequest).toHaveBeenCalledWith(
       expect.objectContaining({ command: 'Bash: npm test', status: 'pending' })
