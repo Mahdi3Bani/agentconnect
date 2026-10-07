@@ -8,8 +8,10 @@ import {
   type IrcMessageEvent
 } from '@agentconnect.md/message'
 import IRC, {
+  type BatchEnd,
   type Client as IrcClient,
   type ConnectOptions,
+  type IrcCommand,
   type MessageEvent as IrcFrameworkMessage
 } from 'irc-framework'
 import type { LoadedAgent } from '../../agents/load-agents.js'
@@ -25,7 +27,7 @@ import type {
 } from '../contract.js'
 import { IrcFloodGate } from './flood.js'
 import { carryFormatting, IRC_FORMATTING_CARRY_BYTES } from './render.js'
-import { ircPayloadBudget, splitIrcText } from './split.js'
+import { ircPayloadBudget, splitIrcPieces, splitIrcText, type IrcPiece } from './split.js'
 
 /** The longest one turn may show as typing without a refresh from its own settlement. */
 const IRC_TYPING_MAX_MS = 15 * 60_000
@@ -107,8 +109,20 @@ const WANTED_CAPS = [
   'account-tag', // stable actor id across nick changes
   'multi-prefix', // full op/voice status in NAMES
   'away-notify',
-  'extended-join'
+  'extended-join',
+  'batch', // requested by irc-framework itself; multiline rides on it
+  'draft/multiline' // a long answer is one message, not a line every 2s
 ] as const
+
+const MULTILINE = 'draft/multiline'
+const MULTILINE_CONCAT = 'draft/multiline-concat'
+
+/** A batch's lines as one text: a continuation joins the line before it with nothing in between. */
+function multilineText(lines: IrcCommand[]): string {
+  return lines
+    .map((c, i) => (i > 0 && !(MULTILINE_CONCAT in (c.tags ?? {})) ? '\n' : '') + (c.params[1] ?? ''))
+    .join('')
+}
 
 // Settled with the echo (msgid present only where message-tags were granted), or null on timeout or stop.
 type EchoWaiter = (receipt: { msgid?: string } | null) => void
@@ -155,6 +169,8 @@ export class IrcConnection implements PlatformConnection {
   private readonly invitedChannels = new Set<string>()
   // Sends awaiting their echo, FIFO per (target, text): the server echoes in the order it received them.
   private readonly awaitingEcho = new Map<string, EchoWaiter[]>()
+  // irc-framework keeps a batch's lines but not the tags of its opening line, where a multiline message's msgid is.
+  private readonly batchTags = new Map<string, Record<string, string>>()
   /** IRCv3 typing per target: how many turns are working there, whether a card has them waiting, the refresh. */
   private readonly typing = new Map<
     string,
@@ -168,6 +184,14 @@ export class IrcConnection implements PlatformConnection {
     this.botUserId = config.nick
     this.key = ircConnKey(config)
     this.client = new IRC.Client()
+    this.client.requestCap(MULTILINE)
+    const handlers = this.client.command_handler.handlers
+    const batch = handlers.BATCH!
+    handlers.BATCH = (command, handler) => {
+      const [ref = ''] = command.params
+      if (ref.startsWith('+') && command.params[1] === MULTILINE) this.batchTags.set(ref.slice(1), command.tags ?? {})
+      return batch(command, handler)
+    }
     this.now = deps.now ?? (() => Date.now())
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms).unref?.()))
     this.flood = new IrcFloodGate(undefined, undefined, this.now, deps.sleep)
@@ -185,6 +209,7 @@ export class IrcConnection implements PlatformConnection {
     this.client.on('socket close', () => this.onSocketClose())
     this.client.on('privmsg', (event: IrcFrameworkMessage) => this.onInbound('privmsg', event))
     this.client.on('action', (event: IrcFrameworkMessage) => this.onInbound('action', event))
+    this.client.on(`batch end ${MULTILINE}`, (end: BatchEnd) => this.onMultiline(end))
     this.client.on('invite', (event: { nick: string; channel: string }) => void this.onInvite(event))
     const ready = new Promise<void>((resolve, reject) => {
       // ISUPPORT (005) lands after 001 but before end-of-MOTD (376, or 422 without one), so resolving there means it is read.
@@ -326,6 +351,7 @@ export class IrcConnection implements PlatformConnection {
     this.typing.clear()
     for (const waiters of this.awaitingEcho.values()) for (const settle of waiters) settle(null)
     this.awaitingEcho.clear()
+    this.batchTags.clear()
     this.client.quit('disconnecting')
   }
 
@@ -368,7 +394,8 @@ export class IrcConnection implements PlatformConnection {
   // ── inbound ──
 
   private onInbound(kind: IrcMessageEvent['kind'], event: IrcFrameworkMessage): void {
-    if (event.from_server || !event.nick) return
+    // A multiline message's lines arrive together at the batch's end, as one message (onMultiline).
+    if (event.from_server || !event.nick || event.batch?.type === MULTILINE) return
     const tags = event.tags ?? {}
     if (ircCaseFold(event.nick, this.casemapping) === ircCaseFold(this.nick, this.casemapping)) {
       // Our own line coming back is a delivery receipt, never a conversation turn.
@@ -405,6 +432,54 @@ export class IrcConnection implements PlatformConnection {
     if (msg) this.deps.onMessage?.(msg)
   }
 
+  /** A multiline message: our own is a send's echo, anyone else's one inbound message with the batch's tags. */
+  private onMultiline(end: BatchEnd): void {
+    const tags = this.batchTags.get(end.id) ?? {}
+    this.batchTags.delete(end.id)
+    const lines = end.commands.filter((c) => c.command === 'PRIVMSG')
+    const first = lines[0]
+    if (!first?.nick) return
+    const target = end.params[0] ?? first.params[0] ?? ''
+    if (ircCaseFold(first.nick, this.casemapping) === ircCaseFold(this.nick, this.casemapping)) {
+      const key = this.batchEchoKey(target, first.params[1] ?? '')
+      const waiters = this.awaitingEcho.get(key)
+      waiters?.shift()?.(tags.msgid ? { msgid: tags.msgid } : {})
+      if (waiters && !waiters.length) this.awaitingEcho.delete(key)
+      return
+    }
+    this.onInbound('privmsg', {
+      from_server: false,
+      nick: first.nick,
+      ident: first.ident,
+      hostname: first.hostname,
+      target,
+      message: multilineText(lines),
+      tags
+    })
+  }
+
+  // A batch is matched by its first line; the prefix keeps it apart from a single line of the same text.
+  private batchEchoKey(target: string, firstLine: string): string {
+    return `batch\n${this.echoKey(target, firstLine)}`
+  }
+
+  /** The server's multiline limits, or null where a long answer has to go line by line. */
+  private multilineLimits(): { maxBytes: number; maxLines: number } | null {
+    if (!['batch', MULTILINE, 'message-tags'].every((cap) => this.negotiated.has(cap))) return null
+    const value = this.client.network?.cap?.available?.get(MULTILINE) ?? ''
+    const params = new Map(value.split(',').map((kv) => kv.split('=') as [string, string]))
+    const maxBytes = Number(params.get('max-bytes'))
+    const maxLines = Number(params.get('max-lines'))
+    // max-bytes is required by the spec; without it the server's limit is unknown.
+    if (!(maxBytes > 0)) return null
+    return { maxBytes, maxLines: maxLines > 0 ? maxLines : Number.POSITIVE_INFINITY }
+  }
+
+  /** Whether a long answer goes out as one message per post (IRCv3 multiline) rather than line by line. */
+  longForm(): boolean {
+    return this.multilineLimits() !== null
+  }
+
   // ── outbound ──
 
   /**
@@ -423,6 +498,11 @@ export class IrcConnection implements PlatformConnection {
       username: this.client.user?.username,
       host: this.client.user?.host
     })
+    const limits = this.multilineLimits()
+    if (limits) {
+      const pieces = splitIrcPieces(text, budget - IRC_FORMATTING_CARRY_BYTES)
+      if (pieces.length > 1) return await this.sendMultiline(target, pieces, options, limits)
+    }
     let lines = splitIrcText(text, budget - IRC_FORMATTING_CARRY_BYTES)
     const { maxLines } = options
     if (maxLines !== undefined && lines.length > maxLines) {
@@ -457,6 +537,77 @@ export class IrcConnection implements PlatformConnection {
       return { id: receipt?.msgid ?? this.mintLocalId(), text: line, confirmed: receipt !== null }
     })
     return Promise.all(receipts)
+  }
+
+  /**
+   * Send as IRCv3 multiline messages: as few as the server's limits allow, each one BATCH, paced as one send and
+   * confirmed by its echoed msgid. `tags` ride the first message. A client without the cap gets the same lines one
+   * by one from the server (blank ones dropped), so nothing is lost on it.
+   */
+  private async sendMultiline(
+    target: string,
+    pieces: IrcPiece[],
+    options: { maxLines?: number; tags?: Record<string, string> },
+    limits: { maxBytes: number; maxLines: number }
+  ): Promise<IrcSendReceipt[]> {
+    const { maxLines } = options
+    if (maxLines !== undefined && pieces.length > maxLines) {
+      const dropped = pieces.length - (maxLines - 1)
+      pieces = [...pieces.slice(0, maxLines - 1), { text: `[… ${dropped} more lines not sent]`, concat: false }]
+    }
+    const carried = carryFormatting(pieces.map((p) => p.text)).map((text, i) => ({ text, concat: pieces[i]!.concat }))
+    const batches: IrcPiece[][] = []
+    let current: IrcPiece[] = []
+    let bytes = 0
+    for (const piece of carried) {
+      const size = Buffer.byteLength(piece.text) + (current.length ? 1 : 0)
+      if (current.length && (current.length >= limits.maxLines || bytes + size > limits.maxBytes)) {
+        batches.push(current)
+        current = []
+        bytes = 0
+      }
+      // A message never opens with a continuation: there is nothing for it to join.
+      current.push(current.length ? piece : { ...piece, concat: false })
+      bytes += Buffer.byteLength(piece.text) + (current.length > 1 ? 1 : 0)
+    }
+    if (current.length) batches.push(current)
+    const tagPrefix = options.tags ? ircTagPrefix(options.tags) : ''
+    const receipts: IrcSendReceipt[] = []
+    for (const [index, lines] of batches.entries()) {
+      receipts.push(await this.sendBatch(target, lines, index === 0 ? tagPrefix : ''))
+    }
+    return receipts
+  }
+
+  private async sendBatch(target: string, lines: IrcPiece[], tagPrefix: string): Promise<IrcSendReceipt> {
+    const ref = `ml${++this.localSeq}`
+    const text = lines.map((l, i) => (i > 0 && !l.concat ? '\n' : '') + l.text).join('')
+    const echo = this.negotiated.has('echo-message')
+    const key = this.batchEchoKey(target, lines[0]!.text)
+    let settle: EchoWaiter = () => {}
+    const echoed = new Promise<{ msgid?: string } | null>((resolve) => (settle = resolve))
+    await this.queue.enqueue(
+      async () => {
+        if (!this.registered) throw new Error('IRC connection is down')
+        if (echo) this.awaitingEcho.set(key, [...(this.awaitingEcho.get(key) ?? []), settle])
+        this.client.raw(`${tagPrefix}BATCH +${ref} ${MULTILINE} ${target}`)
+        for (const line of lines) {
+          this.client.raw(`@batch=${ref}${line.concat ? `;${MULTILINE_CONCAT}` : ''} PRIVMSG ${target} :${line.text}`)
+        }
+        this.client.raw(`BATCH -${ref}`)
+      },
+      () => this.flood.take()
+    )
+    if (!echo) return { id: this.mintLocalId(), text, confirmed: false }
+    const timer = setTimeout(() => {
+      const waiters = this.awaitingEcho.get(key) ?? []
+      if (waiters.includes(settle)) waiters.splice(waiters.indexOf(settle), 1)
+      if (!waiters.length) this.awaitingEcho.delete(key)
+      settle(null)
+    }, this.deps.echoTimeoutMs ?? 10_000)
+    const receipt = await echoed
+    clearTimeout(timer)
+    return { id: receipt?.msgid ?? this.mintLocalId(), text, confirmed: receipt !== null }
   }
 
   // ── typing (IRCv3 +typing) ──

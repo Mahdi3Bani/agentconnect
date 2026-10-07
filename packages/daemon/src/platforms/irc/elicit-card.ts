@@ -22,7 +22,7 @@ import {
   type ElicitSurface,
   type ElicitTarget
 } from '../../slack/render.js'
-import { IRC_MAX_ANSWER_LINES, type IrcReplyPort, type IrcTurnState } from './turn-output.js'
+import { IRC_MAX_ANSWER_LINES, ircThreadTags, type IrcReplyPort, type IrcTurnState } from './turn-output.js'
 
 export const IRC_CARD_TAG = '+mosircley.de/card'
 // The card tag's own limits: a client drops a card that breaks them, leaving only the text.
@@ -151,9 +151,15 @@ export const ircElicitCards: ElicitCardFacet = {
     return await host.postCardSerialized(turn, async () => {
       const [first] = await conn.sendText(target, text, {
         maxLines: isDm ? IRC_MAX_ANSWER_LINES.dm : IRC_MAX_ANSWER_LINES.channel,
-        // A typed question has no buttons, so no card tag: a client shows it as the message it is.
-        ...(labels.length
-          ? { tags: { [IRC_CARD_TAG]: JSON.stringify({ v: 1, options: labels, text: question }) } }
+        // In the turn's thread, as its answer is. A typed question has no buttons, so no card tag: a client shows it
+        // as the message it is.
+        ...(labels.length || state.replyTo
+          ? {
+              tags: {
+                ...ircThreadTags(state),
+                ...(labels.length ? { [IRC_CARD_TAG]: JSON.stringify({ v: 1, options: labels, text: question }) } : {})
+              }
+            }
           : {})
       })
       // An answer is a reply to the card's msgid. Without one from the server nothing could ever answer it, so the

@@ -382,3 +382,76 @@ describe('typing', () => {
     expect(typing()).toEqual([])
   })
 })
+
+describe('long-form posts (IRCv3 multiline)', () => {
+  const MULTILINE = [
+    'message-tags',
+    'server-time',
+    'echo-message',
+    'batch',
+    'draft/multiline=max-bytes=4096,max-lines=100'
+  ]
+  const batchLines = () => server!.received.filter((l) => /BATCH|PRIVMSG/.test(l))
+
+  it('sends a long answer as one message: tags on the BATCH line, confirmed by its echoed msgid', async () => {
+    const c = await connect(MULTILINE)
+    expect(c.longForm()).toBe(true)
+    const receipts = await c.sendText('#cantina', 'Key specs:\n- 740M parameters\n\n- Apache 2.0', {
+      tags: { '+draft/reply': 'q1' }
+    })
+    expect(receipts).toEqual([{ id: 'srv1', text: 'Key specs:\n- 740M parameters\n\n- Apache 2.0', confirmed: true }])
+    expect(batchLines()).toEqual([
+      '@+draft/reply=q1 BATCH +ml1 draft/multiline #cantina',
+      '@batch=ml1 PRIVMSG #cantina :Key specs:',
+      '@batch=ml1 PRIVMSG #cantina :- 740M parameters',
+      '@batch=ml1 PRIVMSG #cantina :',
+      '@batch=ml1 PRIVMSG #cantina :- Apache 2.0',
+      'BATCH -ml1'
+    ])
+  })
+
+  it('wraps a line too long for IRC into pieces that join back exactly', async () => {
+    const c = await connect(MULTILINE)
+    const long = Array.from({ length: 120 }, (_, i) => `w${i}`).join(' ')
+    const [receipt] = await c.sendText('#cantina', `${long}\nnext`)
+    expect(receipt!.text).toBe(`${long}\nnext`)
+    const lines = batchLines().filter((l) => l.includes('PRIVMSG'))
+    expect(lines.length).toBe(3)
+    expect(lines[1]).toMatch(/^@batch=ml1;draft\/multiline-concat PRIVMSG/)
+    expect(lines[2]).toBe('@batch=ml1 PRIVMSG #cantina :next')
+  })
+
+  it("splits into as few messages as the server's limits allow, the tags on the first", async () => {
+    const c = await connect(['message-tags', 'echo-message', 'batch', 'draft/multiline=max-bytes=4096,max-lines=3'])
+    const receipts = await c.sendText('#cantina', 'a\nb\nc\nd\ne', { tags: { '+draft/reply': 'q1' } })
+    expect(receipts.map((r) => r.text)).toEqual(['a\nb\nc', 'd\ne'])
+    expect(batchLines().filter((l) => l.includes(' BATCH +') || l.startsWith('BATCH +'))).toEqual([
+      '@+draft/reply=q1 BATCH +ml1 draft/multiline #cantina',
+      'BATCH +ml2 draft/multiline #cantina'
+    ])
+  })
+
+  it('still sends one line as a plain PRIVMSG', async () => {
+    const c = await connect(MULTILINE)
+    await c.sendText('#cantina', 'hello')
+    expect(batchLines()).toEqual(['PRIVMSG #cantina :hello'])
+  })
+
+  it("reads someone else's multiline message as one message with the batch's msgid", async () => {
+    const { deps, received } = nextMessage()
+    await connect(MULTILINE, {}, deps)
+    server!.push('@msgid=m7;time=2026-09-28T12:00:00.000Z :han!h@host BATCH +x draft/multiline #cantina')
+    server!.push('@batch=x :han!h@host PRIVMSG #cantina :agentconnect: two things:')
+    server!.push('@batch=x :han!h@host PRIVMSG #cantina :one')
+    server!.push('@batch=x;draft/multiline-concat :han!h@host PRIVMSG #cantina :, and two')
+    server!.push(':han!h@host BATCH -x')
+    expect(await received).toMatchObject({ msgId: 'irc:#cantina:m7', text: 'two things:\none, and two' })
+  })
+
+  it('stays line by line where the server offers no multiline', async () => {
+    const c = await connect()
+    expect(c.longForm()).toBe(false)
+    await c.sendText('#cantina', 'a\nb')
+    expect(batchLines()).toEqual(['PRIVMSG #cantina :a', 'PRIVMSG #cantina :b'])
+  })
+})

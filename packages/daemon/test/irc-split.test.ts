@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { IrcFloodGate } from '../src/platforms/irc/flood.js'
-import { IRC_LINE_MAX_BYTES, ircPayloadBudget, splitIrcText } from '../src/platforms/irc/split.js'
+import { IRC_LINE_MAX_BYTES, ircPayloadBudget, splitIrcPieces, splitIrcText } from '../src/platforms/irc/split.js'
 
 const bytes = (s: string) => new TextEncoder().encode(s).length
 
@@ -87,5 +87,23 @@ describe('RFC 1459 flood pacing', () => {
     const before = clock
     for (let i = 0; i < 4; i++) await gate.take()
     expect(clock).toBe(before)
+  })
+})
+
+describe('pieces of one multiline message', () => {
+  it('keeps one blank line between paragraphs and none at the ends', () => {
+    expect(splitIrcPieces('\n\na\n\n\n\nb\n\n', 400)).toEqual([
+      { text: 'a', concat: false },
+      { text: '', concat: false },
+      { text: 'b', concat: false }
+    ])
+  })
+
+  it('wraps a long line into continuations that join back to it exactly', () => {
+    const line = 'alpha beta gamma delta epsilon'
+    const pieces = splitIrcPieces(line, 12)
+    expect(pieces.length).toBeGreaterThan(1)
+    expect(pieces.slice(1).every((p) => p.concat)).toBe(true)
+    expect(pieces.map((p) => p.text).join('')).toBe(line)
   })
 })

@@ -9,7 +9,7 @@ import net from 'node:net'
  * `caps` is the knob.
  */
 export interface TestServerOptions {
-  /** What the server advertises in CAP LS. Empty means a pre-IRCv3 network. */
+  /** What the server advertises in CAP LS, a value after `=`. Empty means a pre-IRCv3 network. */
   caps?: string[]
   /** The ISUPPORT BOT mode letter, as Ergo advertises B. Absent means the network has no bot mode. */
   botMode?: string
@@ -66,6 +66,11 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
     let registered = false
     const acked = new Set<string>()
     let msgSeq = 0
+    // Open multiline batches by their client ref: relayed (echoed) whole at BATCH -, with the msgid on the BATCH line.
+    const batches = new Map<
+      string,
+      { target: string; clientTags: string[]; lines: { text: string; concat: boolean }[] }
+    >()
 
     // A real server withholds 001 until CAP END. Sending it early ends
     // registration before the client has asked for anything, which is exactly
@@ -97,6 +102,7 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
                 .split(';')
                 .filter((t) => t.startsWith('+'))
             : []
+        const lineTags = tagged > 0 ? raw.slice(1, tagged).split(';') : []
         const line = tagged > 0 ? raw.slice(tagged + 1) : raw
         const [command = '', ...args] = line.split(' ')
 
@@ -114,8 +120,9 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
                 .slice(line.indexOf(':') + 1)
                 .split(' ')
                 .filter(Boolean)
-              const granted = asked.filter((c) => caps.includes(c))
-              const refused = asked.filter((c) => !caps.includes(c))
+              const names = caps.map((c) => c.split('=')[0])
+              const granted = asked.filter((c) => names.includes(c))
+              const refused = asked.filter((c) => !names.includes(c))
               granted.forEach((c) => acked.add(c))
               if (granted.length) send(`:server CAP ${nick} ACK :${granted.join(' ')}`)
               if (refused.length) send(`:server CAP ${nick} NAK :${refused.join(' ')}`)
@@ -185,7 +192,36 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
             break
           }
 
+          case 'BATCH': {
+            const ref = args[0] ?? ''
+            if (ref.startsWith('+') && args[1] === 'draft/multiline') {
+              batches.set(ref.slice(1), { target: args[2] ?? '', clientTags, lines: [] })
+              break
+            }
+            const open = batches.get(ref.slice(1))
+            batches.delete(ref.slice(1))
+            if (!open || !acked.has('echo-message') || options.withholdEcho) break
+            const id = `srv${++msgSeq}`
+            const head = [...open.clientTags, `msgid=${id}`, `time=${new Date().toISOString()}`]
+            send(`@${head.join(';')} :${nick}!u@h BATCH +${id} draft/multiline ${open.target}`)
+            for (const l of open.lines) {
+              send(
+                `@batch=${id}${l.concat ? ';draft/multiline-concat' : ''} :${nick}!u@h PRIVMSG ${open.target} :${l.text}`
+              )
+            }
+            send(`:${nick}!u@h BATCH -${id}`)
+            break
+          }
+
           case 'PRIVMSG': {
+            const inBatch = batches.get(lineTags.find((t) => t.startsWith('batch='))?.slice(6) ?? '')
+            if (inBatch) {
+              inBatch.lines.push({
+                text: line.slice(line.indexOf(' :') + 2),
+                concat: lineTags.includes('draft/multiline-concat')
+              })
+              break
+            }
             if (!acked.has('echo-message') || options.withholdEcho) break
             const target = args[0] ?? ''
             const text = line.slice(line.indexOf(' :') + 2)

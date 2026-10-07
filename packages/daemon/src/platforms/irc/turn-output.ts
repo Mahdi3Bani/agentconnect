@@ -11,6 +11,8 @@ import { renderIrcText } from './render.js'
 
 /** An answer longer than this is cut, with a notice: a channel is shared, and 1 line per 2s makes a long one a minute. */
 export const IRC_MAX_ANSWER_LINES = { channel: 12, dm: 40 }
+/** Where a post is one multiline message, it arrives at once and a client can fold it, so it may be long-form. */
+export const IRC_MAX_LONG_FORM_LINES = { channel: 200, dm: 400 }
 // Progress is one short line, twice per turn at most, at least 15s apart.
 const PROGRESS_MAX_BYTES = 300
 const PROGRESS_MAX_COUNT = 2
@@ -36,6 +38,8 @@ export interface IrcReplyPort {
   typingStart?(target: string): void
   typingStop?(target: string): void
   typingPause?(target: string, paused: boolean): void
+  /** Whether a post goes out as one multiline message; absent means line by line. */
+  longForm?(): boolean
 }
 
 // IRC cannot edit or delete, so nothing streams: one final post, and progress only as rationed completed messages.
@@ -126,6 +130,8 @@ export interface IrcTurnState {
   isDm: boolean
   /** Who asked, so a channel answer can be addressed to them the IRC way. */
   askedBy?: string
+  /** The msgid every post of the turn replies to (+draft/reply), so a client threads the answer under the question. */
+  replyTo?: string
   lastProgress?: string
 }
 
@@ -133,12 +139,30 @@ export function initialIrcTurnState(ctx: TurnOutputContext<NormalizedMessage>): 
   const conn = ctx.egress as IrcReplyPort | undefined
   // Typing runs for the turn's life: started with its state, stopped by the surface's onSettle.
   if (ctx.mode !== 'none') conn?.typingStart?.(ctx.message.channel)
+  const replyTo = ircThreadRoot(ctx.message)
   return {
     conn,
     target: ctx.message.channel,
     isDm: ctx.isDm,
-    ...(ctx.message.sender.name ? { askedBy: ctx.message.sender.name } : {})
+    ...(ctx.message.sender.name ? { askedBy: ctx.message.sender.name } : {}),
+    ...(replyTo ? { replyTo } : {})
   }
+}
+
+/**
+ * The thread a turn answers in: the one the question was asked in (threads are flat, a reply names the root), or
+ * the question itself. Undefined when the server gave the question no msgid, as there is nothing to reply to.
+ */
+export function ircThreadRoot(message: NormalizedMessage): string | undefined {
+  if (message.replyTo) return message.replyTo
+  const prefix = `irc:${message.channel}:`
+  const native = message.msgId?.startsWith(prefix) ? message.msgId.slice(prefix.length) : ''
+  return native && !native.startsWith('local-') ? native : undefined
+}
+
+/** The tags a post of the turn carries: the reply that threads it. */
+export function ircThreadTags(state: IrcTurnState): Record<string, string> | undefined {
+  return state.replyTo ? { '+draft/reply': state.replyTo } : undefined
 }
 
 export async function applyIrcAction(
@@ -150,7 +174,10 @@ export async function applyIrcAction(
   // Core's notices are chrome: posted, never recorded, as on every other surface.
   if (action.kind === 'notice') {
     if (state.conn)
-      await state.conn.sendText(state.target, addressed(state, action.text), { maxLines: NOTICE_MAX_LINES })
+      await state.conn.sendText(state.target, addressed(state, action.text), {
+        maxLines: NOTICE_MAX_LINES,
+        ...thread(state)
+      })
     return
   }
   if (action.kind !== 'post' && action.kind !== 'irc-progress') return
@@ -160,13 +187,17 @@ export async function applyIrcAction(
   if (action.recordOnly || !state.conn) return
   const text = addressed(state, action.text)
   if (action.kind === 'irc-progress') {
-    await state.conn.sendText(state.target, text, { maxLines: 1 })
+    await state.conn.sendText(state.target, text, { maxLines: 1, ...thread(state) })
     state.lastProgress = action.text
     return
   }
-  await state.conn.sendText(state.target, text, {
-    maxLines: state.isDm ? IRC_MAX_ANSWER_LINES.dm : IRC_MAX_ANSWER_LINES.channel
-  })
+  const caps = state.conn.longForm?.() ? IRC_MAX_LONG_FORM_LINES : IRC_MAX_ANSWER_LINES
+  await state.conn.sendText(state.target, text, { maxLines: state.isDm ? caps.dm : caps.channel, ...thread(state) })
+}
+
+function thread(state: IrcTurnState): { tags?: Record<string, string> } {
+  const tags = ircThreadTags(state)
+  return tags ? { tags } : {}
 }
 
 // `nick: text` is how a channel reply says who it answers; a DM needs no address.

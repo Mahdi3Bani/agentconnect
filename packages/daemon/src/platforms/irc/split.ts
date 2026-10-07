@@ -42,7 +42,32 @@ export function splitIrcText(text: string, maxBytes: number): string[] {
   return out
 }
 
-function splitLine(line: string, maxBytes: number): string[] {
+/** One line of a multiline message; a continuation joins the line before it with nothing in between. */
+export interface IrcPiece {
+  text: string
+  concat: boolean
+}
+
+/**
+ * Lines for one IRCv3 multiline message. Unlike {@link splitIrcText}, a blank line is kept (one in a row, none at
+ * either end), since a long answer reads in paragraphs, and a line too long for one IRC line becomes pieces that
+ * join back exactly: the break keeps its whitespace.
+ */
+export function splitIrcPieces(text: string, maxBytes: number): IrcPiece[] {
+  if (maxBytes < 4) throw new Error(`IRC payload budget of ${maxBytes} bytes cannot hold one code point`)
+  const out: IrcPiece[] = []
+  for (const source of text.replace(/\x00/g, '').split(/\r\n|\r|\n/)) {
+    if (!source.trim()) {
+      if (out.length && out[out.length - 1]!.text !== '') out.push({ text: '', concat: false })
+      continue
+    }
+    splitLine(source, maxBytes, true).forEach((piece, i) => out.push({ text: piece, concat: i > 0 }))
+  }
+  while (out.length && out[out.length - 1]!.text === '') out.pop()
+  return out
+}
+
+function splitLine(line: string, maxBytes: number, keepSpaces = false): string[] {
   const out: string[] = []
   let current: { g: string; bytes: number }[] = []
   let size = 0
@@ -51,13 +76,11 @@ function splitLine(line: string, maxBytes: number): string[] {
 
   const flush = (upTo: number) => {
     const head = current.slice(0, upTo)
-    const text = head
-      .map((x) => x.g)
-      .join('')
-      .trimEnd()
+    const joined = head.map((x) => x.g).join('')
+    const text = keepSpaces ? joined : joined.trimEnd()
     if (text) out.push(text)
     current = current.slice(upTo)
-    while (current.length && /^\s+$/.test(current[0]!.g)) current.shift()
+    while (!keepSpaces && current.length && /^\s+$/.test(current[0]!.g)) current.shift()
     size = current.reduce((n, x) => n + x.bytes, 0)
     lastSpace = -1
     current.forEach((x, i) => {

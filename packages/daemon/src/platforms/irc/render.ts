@@ -5,11 +5,15 @@ const BOLD = '\x02'
 const ITALIC = '\x1d'
 const MONO = '\x11'
 
-/** Agent markdown as IRC text: bold and italics become mIRC codes, links show their URL, code keeps its lines. */
+/**
+ * Agent markdown as IRC text: bold and italics become mIRC codes, links show their URL, code keeps its lines. Blocks
+ * are paragraphs, a blank line apart: a multiline message keeps it, and line by line a blank line is not sent.
+ */
 export function renderIrcText(markdown: string): string {
-  return blocks(fromMarkdown(markdown).children, '')
-    .join('\n')
-    .replace(/\n{2,}/g, '\n')
+  return fromMarkdown(markdown)
+    .children.map((node) => block(node, '').join('\n'))
+    .join('\n\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
 

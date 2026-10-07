@@ -100,9 +100,17 @@ asserted -- you cannot ask Libera.Chat to stop supporting `message-tags`.
   because neither platform can edit: nothing streams, the final answer is posted
   once. Progress is completed intermediate messages only: in a channel only in
   `high` mode, in a DM from `medium`; at most 2, 15s apart, one line each. A
-  channel answer is addressed `nick: ...`; answers are cut at 12 lines in a
-  channel and 40 in a DM, with a notice line. No admission feedback: IRC has no
-  reactions, and a "working on it" line in a shared channel is noise.
+  channel answer is addressed `nick: ...`. Every post of a turn (answer,
+  progress, notices, cards) replies to the question with `+draft/reply`, or to
+  the thread it was asked in, so a client that threads shows the conversation
+  under it. Where the server grants `draft/multiline`, a post is one message
+  (a BATCH within the server's max-bytes/max-lines; more if it overflows) that
+  arrives at once and keeps blank lines, and an answer may run to 200 lines in
+  a channel and 400 in a DM. Without it, lines go one by one under flood
+  control and answers are cut at 12 lines in a channel and 40 in a DM, with a
+  notice line. Someone else's multiline message is read as one message. No
+  admission feedback: IRC has no reactions, and a "working on it" line in a
+  shared channel is noise.
 - **Markdown**: bold and italics become mIRC codes, links show their URL, code
   fences are dropped but lines kept. Clients reset formatting at every line
   end, so `carryFormatting` closes and reopens it across each split.
