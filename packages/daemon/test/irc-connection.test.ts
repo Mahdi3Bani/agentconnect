@@ -421,13 +421,15 @@ describe('long-form posts (IRCv3 multiline)', () => {
     expect(lines[2]).toBe('@batch=ml1 PRIVMSG #cantina :next')
   })
 
-  it("splits into as few messages as the server's limits allow, the tags on the first", async () => {
+  it("splits into as few messages as the server's limits allow, the tags on the first, the thread on every one", async () => {
     const c = await connect(['message-tags', 'echo-message', 'batch', 'draft/multiline=max-bytes=4096,max-lines=3'])
-    const receipts = await c.sendText('#cantina', 'a\nb\nc\nd\ne', { tags: { '+draft/reply': 'q1' } })
+    const receipts = await c.sendText('#cantina', 'a\nb\nc\nd\ne', {
+      tags: { '+draft/reply': 'q1', '+mosircley.de/card': '{}' }
+    })
     expect(receipts.map((r) => r.text)).toEqual(['a\nb\nc', 'd\ne'])
     expect(batchLines().filter((l) => l.includes(' BATCH +') || l.startsWith('BATCH +'))).toEqual([
-      '@+draft/reply=q1 BATCH +ml1 draft/multiline #cantina',
-      'BATCH +ml2 draft/multiline #cantina'
+      '@+draft/reply=q1;+mosircley.de/card={} BATCH +ml1 draft/multiline #cantina',
+      '@+draft/reply=q1 BATCH +ml2 draft/multiline #cantina'
     ])
   })
 

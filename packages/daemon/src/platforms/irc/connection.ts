@@ -484,8 +484,9 @@ export class IrcConnection implements PlatformConnection {
 
   /**
    * Split to fit the relayed 512-byte line, pace under flood control, and resolve once each line is echoed or times out.
-   * `tags` ride the FIRST line only, so a tagged message is addressed by that line's msgid; they are dropped where the
-   * server did not grant message-tags. Tags are outside the 512-byte budget, which is the body's alone.
+   * `tags` ride the FIRST line only, so a tagged message is addressed by that line's msgid -- except the thread reply
+   * (`+draft/reply`), which every line carries so a client keeps them all in the thread. Tags are dropped where the
+   * server did not grant message-tags, and are outside the 512-byte budget, which is the body's alone.
    */
   async sendText(
     target: string,
@@ -510,7 +511,9 @@ export class IrcConnection implements PlatformConnection {
       lines = [...lines.slice(0, maxLines - 1), `[… ${dropped} more lines not sent]`]
     }
     const echo = this.negotiated.has('echo-message')
-    const tagPrefix = options.tags && this.negotiated.has('message-tags') ? ircTagPrefix(options.tags) : ''
+    const tagged = options.tags && this.negotiated.has('message-tags')
+    const tagPrefix = tagged ? ircTagPrefix(options.tags!) : ''
+    const threadPrefix = tagged ? ircTagPrefix(threadTags(options.tags!)) : ''
     const receipts = carryFormatting(lines).map(async (line, index): Promise<IrcSendReceipt> => {
       const key = this.echoKey(target, line)
       let settle: EchoWaiter = () => {}
@@ -521,7 +524,7 @@ export class IrcConnection implements PlatformConnection {
           // irc-framework drops a write on a closed socket silently, so a send between drop and 001 fails here instead.
           if (!this.registered) throw new Error('IRC connection is down')
           if (echo) this.awaitingEcho.set(key, [...(this.awaitingEcho.get(key) ?? []), settle])
-          this.client.raw(`${index === 0 ? tagPrefix : ''}PRIVMSG ${target} :${line}`)
+          this.client.raw(`${index === 0 ? tagPrefix : threadPrefix}PRIVMSG ${target} :${line}`)
         },
         () => this.flood.take()
       )
@@ -541,7 +544,7 @@ export class IrcConnection implements PlatformConnection {
 
   /**
    * Send as IRCv3 multiline messages: as few as the server's limits allow, each one BATCH, paced as one send and
-   * confirmed by its echoed msgid. `tags` ride the first message. A client without the cap gets the same lines one
+   * confirmed by its echoed msgid. `tags` ride the first message, the thread reply every one. A client without the cap gets the same lines one
    * by one from the server (blank ones dropped), so nothing is lost on it.
    */
   private async sendMultiline(
@@ -572,9 +575,10 @@ export class IrcConnection implements PlatformConnection {
     }
     if (current.length) batches.push(current)
     const tagPrefix = options.tags ? ircTagPrefix(options.tags) : ''
+    const threadPrefix = options.tags ? ircTagPrefix(threadTags(options.tags)) : ''
     const receipts: IrcSendReceipt[] = []
     for (const [index, lines] of batches.entries()) {
-      receipts.push(await this.sendBatch(target, lines, index === 0 ? tagPrefix : ''))
+      receipts.push(await this.sendBatch(target, lines, index === 0 ? tagPrefix : threadPrefix))
     }
     return receipts
   }
@@ -765,6 +769,11 @@ export class IrcConnection implements PlatformConnection {
   async downloadFile(): Promise<Buffer | null> {
     return null
   }
+}
+
+/** The tags every line of a send repeats: the thread reply, so a long answer stays in its thread. */
+function threadTags(tags: Record<string, string>): Record<string, string> {
+  return '+draft/reply' in tags ? { '+draft/reply': tags['+draft/reply']! } : {}
 }
 
 /** `@key=value;key2=value2 `, values escaped as IRCv3 message-tags requires; empty for no tags. */
