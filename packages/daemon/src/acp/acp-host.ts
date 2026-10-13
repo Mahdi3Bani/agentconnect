@@ -1015,7 +1015,10 @@ export class AcpHost {
       if (!desired) continue
       const plan = planConfigSelection(options, category, desired)
       if ('skip' in plan) {
-        this.opts.log?.debug(`acp: session config ${category}="${desired}" not applied — ${plan.skip}`)
+        // A configured value the runtime does not offer means the session silently runs on something else: say so.
+        const message = `acp: session config ${category}="${desired}" not applied — ${plan.skip}`
+        if (plan.skip.startsWith('value ')) this.opts.log?.warn(message)
+        else this.opts.log?.debug(message)
         continue
       }
       try {
