@@ -359,11 +359,18 @@ interface EditorElicitationEntry {
   notify?: DmNotice
 }
 
+// Kinds whose "Always allow" holds for the rest of the session. Commands are not among them: allowing one command
+// always is not allowing every command.
+const REMEMBERED_ALWAYS_KINDS: ReadonlySet<string> = new Set(['read', 'edit', 'search', 'fetch'])
+
 export class PermissionCoordinator {
   // ── Permission requests (ACP session/request_permission) ─────────────────────
   /** Durable rows still being written. Admission publishes its resolver first, so anything that
    *  settles a request must wait for the row it settles to exist. */
   private readonly recordedWrites = new Map<string, Promise<unknown>>()
+  /** Per session, the tool kinds a chat approver answered "Always allow" for. A runtime may scope its own "always"
+   *  narrower than the person meant (OpenCode re-asks for every file), so the same kind is not asked again. */
+  private readonly alwaysAllowedKinds = new Map<string, Set<string>>()
   private pendingEditorPermissions = new Map<string, EditorPermissionEntry | EditorElicitationEntry>()
 
   private pendingChatPermissions = new Map<
@@ -483,7 +490,8 @@ export class PermissionCoordinator {
     sessionId: string,
     request: ApprovalRequestParts,
     p: Pending,
-    notifyChat = true
+    notifyChat = true,
+    hint?: string
   ): Promise<{ requesterName: string | null }> {
     const command = approvalRequestSummary(request)
     const store = this.host.store()
@@ -503,7 +511,9 @@ export class PermissionCoordinator {
     })
 
     if (!notifyChat) return { requesterName }
-    const text = '🔒 Permission requested. Ask an Agent editor to allow it from the Agent or Session page.'
+    const text =
+      '🔒 Permission requested. Ask an Agent editor to allow it from the Agent or Session page.' +
+      (hint ? ` ${hint}` : '')
     try {
       if (p.webchat) {
         p.webchat.sink.output({
@@ -517,7 +527,8 @@ export class PermissionCoordinator {
       // surface owns that notice where it has one — Linear's feed has no chat transport at all,
       // so without this the gate would be invisible until the session went stale.
       if (!p.webchat || p.webchat.continuation) {
-        if (!this.host.approvalGateOpened(p, id, request) && p.conn) this.host.enqueueApply(p, { kind: 'notice', text })
+        if (!this.host.approvalGateOpened(p, id, request) && (p.conn ?? p.egress))
+          this.host.enqueueApply(p, { kind: 'notice', text })
       }
     } catch (err) {
       // The durable editor request is authoritative. A best-effort chat notice
@@ -576,7 +587,8 @@ export class PermissionCoordinator {
     sessionId: string,
     params: RequestPermissionRequest,
     evaluationParams: RequestPermissionRequest,
-    p: Pending
+    p: Pending,
+    hint?: string
   ): Promise<RequestPermissionResponse> {
     const id = randomUUID()
     let resolveResult!: (res: RequestPermissionResponse) => void
@@ -596,7 +608,15 @@ export class PermissionCoordinator {
     // The human wait starts when the request becomes answerable, not when its row lands — the
     // write used to be synchronous, and billing it to the turn's retry budget would shrink it.
     const wait = this.trackHumanApprovalWait(p, result)
-    const recorded = this.noteEditorPermissionRequest(id, agentId, sessionId, permissionRequestParts(params), p)
+    const recorded = this.noteEditorPermissionRequest(
+      id,
+      agentId,
+      sessionId,
+      permissionRequestParts(params),
+      p,
+      true,
+      hint
+    )
     this.recordedWrites.set(id, recorded)
     let requesterName: string | null = null
     try {
@@ -749,7 +769,7 @@ export class PermissionCoordinator {
           event: { kind: 'message', text: notice('markdown') }
         })
       }
-      if ((!p.webchat || p.webchat.continuation) && p.conn)
+      if ((!p.webchat || p.webchat.continuation) && (p.conn ?? p.egress))
         this.host.enqueueApply(p, { kind: 'notice', text: notice(turnChromeFor(p.plan.platform).noticeMarkup) })
     } catch (err) {
       this.host.log().warn(`permission option notice failed for "${p.plan.sessionKey}": ${formatErr(err)}`)
@@ -1465,8 +1485,10 @@ export class PermissionCoordinator {
       return await this.awaitCardPermission(agentId, sessionId, params, evaluationParams, p, facet, approver)
     }
     // Default policy: hold the runtime request and surface only a neutral notice
-    // in chat. The bounded, masked request is decided by an Agent editor.
-    return await this.awaitEditorPermission(agentId, sessionId, params, evaluationParams, p)
+    // in chat. The bounded, masked request is decided by an Agent editor. An asker the
+    // surface refused is told how they could answer here themselves.
+    const hint = facet?.chatApprover ? facet.untrustedApproverHint : undefined
+    return await this.awaitEditorPermission(agentId, sessionId, params, evaluationParams, p, hint)
   }
 
   /** A tool approval on a surface's elicitation card: the options as one single-select, answerable only by
@@ -1480,6 +1502,13 @@ export class PermissionCoordinator {
     facet: ElicitCardFacet,
     approver: string
   ): Promise<RequestPermissionResponse> {
+    const always = params.options.find((o) => o.kind === 'allow_always')
+    const kind = params.toolCall?.kind ?? ''
+    const sessionKey = pendingTurnKey(p.hostKey, sessionId)
+    if (always && REMEMBERED_ALWAYS_KINDS.has(kind) && this.alwaysAllowedKinds.get(sessionKey)?.has(kind)) {
+      this.permissionEvaluationDetails.set(evaluationParams, { reason: 'permission_always_allowed_in_chat' })
+      return { outcome: { outcome: 'selected', optionId: always.optionId } }
+    }
     const ask = permissionElicitation(params)
     const form = elicitForm(ask, facet.reduction)
     if (!form || elicitCardShape(form) === 'inputs')
@@ -1493,6 +1522,11 @@ export class PermissionCoordinator {
     if (!option) {
       this.permissionEvaluationDetails.set(evaluationParams, { reason: 'permission_card_unanswered' })
       return { outcome: { outcome: 'cancelled' } }
+    }
+    if (option.kind === 'allow_always' && REMEMBERED_ALWAYS_KINDS.has(kind)) {
+      if (this.alwaysAllowedKinds.size >= 1000)
+        this.alwaysAllowedKinds.delete(this.alwaysAllowedKinds.keys().next().value!)
+      this.alwaysAllowedKinds.set(sessionKey, new Set([...(this.alwaysAllowedKinds.get(sessionKey) ?? []), kind]))
     }
     return { outcome: { outcome: 'selected', optionId: option.optionId } }
   }
@@ -1764,7 +1798,7 @@ export class PermissionCoordinator {
    *  editor queue with its own notice. Returns `undefined` so a decline site stays one line.
    *  Best effort: the decline never depends on the notice landing. */
   private noticeUnrenderableElicit(p: Pending, params: CreateElicitationRequest, isApproval: boolean): undefined {
-    if (isApproval || !p.conn) return undefined
+    if (isApproval || !(p.conn ?? p.egress)) return undefined
     const text = this.takeElicitDeclineNotice(p, params, 'chat')
     if (text === null) return undefined
     try {

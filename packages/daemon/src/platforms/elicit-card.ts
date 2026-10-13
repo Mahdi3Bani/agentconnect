@@ -211,4 +211,7 @@ export interface ElicitCardFacet {
    *  this surface takes no tool approvals at all. Still behind the agent's
    *  `allowRuntimeChangesInChat`; this narrows WHO, never whether. */
   chatApprover?(requesterId: string | undefined): string | null
+  /** Said beside the editor-queue notice when {@link chatApprover} refused the asker: how they could
+   *  answer here themselves next time. */
+  untrustedApproverHint?: string
 }

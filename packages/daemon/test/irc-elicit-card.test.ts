@@ -43,7 +43,7 @@ describe('the IRC card text and the replies it reads', () => {
 
 type Sent = { target: string; text: string; options?: { maxLines?: number; tags?: Record<string, string> } }
 
-function ircTurn(isDm = false, opts: { requesterId?: string; chatApprovals?: boolean } = {}) {
+function ircTurn(isDm = false, opts: { requesterId?: string; chatApprovals?: boolean; egressOnly?: boolean } = {}) {
   const daemon: any = new Daemon({ slackAppFactory: fakeSlackAppFactory(), sandboxMechanism: null })
   daemon.store = {
     getSessionByAcpIdForAgent: () => ({ triggeredBy: 'user-1' }),
@@ -78,7 +78,9 @@ function ircTurn(isDm = false, opts: { requesterId?: string; chatApprovals?: boo
     entry: { msg: opts.requesterId ? { sender: { id: opts.requesterId, name: 'mahdi' } } : {} },
     hostKey: 'agent-1',
     outwardSessionId: 'sess-1',
-    conn,
+    // A live IRC turn has no reply connection, only the leased egress; the harness offers both unless told.
+    ...(opts.egressOnly ? {} : { conn }),
+    egress: conn,
     turnState: { conn, target: channel, isDm, askedBy: 'mahdi' } satisfies IrcTurnState,
     chrome: {},
     reply: { text: '', attemptText: '', attemptAnswerUpdates: [] },
@@ -339,12 +341,38 @@ describe('a tool approval on IRC', () => {
     ])
   })
 
-  it('leaves an asker with no account to the Agent editors: no card', async () => {
-    const h = ircTurn(false, { requesterId: 'nick:mahdi', chatApprovals: true })
+  it('leaves an asker with no account to the Agent editors: no card, but a notice saying how to answer here', async () => {
+    const h = ircTurn(false, { requesterId: 'nick:mahdi', chatApprovals: true, egressOnly: true })
     void h.daemon.permissions.onAcpPermission('agent-1', 's1', BASH)
     await vi.waitFor(() => expect(h.daemon.store.createPermissionRequest).toHaveBeenCalled())
     expect(h.sent).toEqual([])
     expect(h.daemon.permissions.pendingElicits.size).toBe(0)
+    await vi.waitFor(() =>
+      expect(h.applied.filter((a) => a.kind === 'notice').map((a) => a.text)).toEqual([
+        '🔒 Permission requested. Ask an Agent editor to allow it from the Agent or Session page. ' +
+          'To approve requests here yourself, log in to NickServ first.'
+      ])
+    )
+  })
+
+  it('remembers Always allow for file edits in the session, but asks again for every command', async () => {
+    const h = ircTurn(false, { requesterId: ME, chatApprovals: true, egressOnly: true })
+    const EDIT = (path: string) => ({
+      ...BASH,
+      toolCall: { toolCallId: path, title: path, kind: 'edit', rawInput: { filepath: path } }
+    })
+    const first = h.daemon.permissions.onAcpPermission('agent-1', 's1', EDIT('/w/a.js'))
+    await vi.waitFor(() => expect([...h.daemon.permissions.pendingElicits.values()][0]?.ts).toBe('srv1'))
+    await h.daemon.permissions.claimElicitReply({ ...reply('Always allow', 'srv1'), actor: { userId: ME } })
+    await expect(first).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'always' } })
+    const cards = h.sent.length
+    await expect(h.daemon.permissions.onAcpPermission('agent-1', 's1', EDIT('/w/b.js'))).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'always' }
+    })
+    expect(h.sent.length).toBe(cards)
+    // A command is still asked about, Always allow on an edit or not.
+    void h.daemon.permissions.onAcpPermission('agent-1', 's1', BASH)
+    await vi.waitFor(() => expect(h.sent.length).toBeGreaterThan(cards))
   })
 
   it('leaves the request to the Agent editors when the agent has not opted in', async () => {

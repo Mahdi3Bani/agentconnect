@@ -199,6 +199,7 @@ export const ircElicitCards: ElicitCardFacet = {
   chatApprover(requesterId: string | undefined): string | null {
     return requesterId?.startsWith('account:') ? requesterId : null
   },
+  untrustedApproverHint: 'To approve requests here yourself, log in to NickServ first.',
 
   // IRC cannot edit the card, so the verdict is a reply to it.
   settle(handle: ElicitCardHandle, card: ElicitCardSettlement): void {
