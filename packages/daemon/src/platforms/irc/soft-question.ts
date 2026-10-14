@@ -20,12 +20,17 @@ export function ircSoftQuestion(text: string): string[] | null {
     .split(/\r?\n/)
     .map((l) => l.trimEnd())
   while (lines.length && !lines[lines.length - 1]!.trim()) lines.pop()
-  // The list may be followed by one closing line ("Or tell me something else?").
+  // The list may be followed by one closing line ("Which one would you like?"), blank lines around it or not.
   let end = lines.length - 1
   let after = ''
   if (end >= 0 && !OPTION.test(lines[end]!)) {
     after = lines[end]!
     end--
+    // Apart from the list, the closing line has to be the question itself, or it is an answer that moved on.
+    if (end >= 0 && !lines[end]!.trim()) {
+      if (!after.includes('?')) return null
+      while (end >= 0 && !lines[end]!.trim()) end--
+    }
   }
   let start = end
   while (start >= 0 && OPTION.test(lines[start]!)) start--
@@ -38,10 +43,11 @@ export function ircSoftQuestion(text: string): string[] | null {
   return options.map((m) => label(m[3]!))
 }
 
-// The option's name, without markdown emphasis or the description after a dash or colon, kept to a button's width.
+// The option's name, without markdown emphasis or the description after a dash, a colon or in parentheses, kept to
+// a button's width.
 function label(option: string): string {
   const plain = option.replace(/\*\*|__|`/g, '').trim()
-  const name = plain.split(/\s+[—–-]\s+|:\s+/)[0]!.trim() || plain
+  const name = plain.split(/\s+[—–-]\s+|:\s+|\s+\(/)[0]!.trim() || plain
   return name.length > MAX_LABEL ? `${name.slice(0, MAX_LABEL - 1)}…` : name
 }
 

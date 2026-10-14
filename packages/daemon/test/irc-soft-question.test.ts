@@ -14,6 +14,14 @@ describe('a question in an answer', () => {
       )
     ).toEqual(['JSON file', 'SQLite', 'Postgres'])
     expect(ircSoftQuestion('Pick one:\n[1] Yes\n[2] No\nWhich do you prefer?')).toEqual(['Yes', 'No'])
+    // As GLM wrote it in #test: a blank line before the closing question, descriptions in parentheses.
+    expect(
+      ircSoftQuestion(
+        'MAAHDI: Happy to build a small notes CLI in `notes/`. First, which storage should it use?\n\n' +
+          '1. A single JSON file (simple, human-readable)\n2. SQLite (robust querying, no external server)\n' +
+          '3. One Markdown file per note (easy to edit by hand, versionable)\n\nWhich one would you like?'
+      )
+    ).toEqual(['A single JSON file', 'SQLite', 'One Markdown file per note'])
   })
 
   it('is not read from a list of steps, a list mid-answer, or a list that skips numbers', () => {
