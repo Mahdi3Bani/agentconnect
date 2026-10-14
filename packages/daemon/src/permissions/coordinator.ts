@@ -359,8 +359,8 @@ interface EditorElicitationEntry {
   notify?: DmNotice
 }
 
-// Kinds whose "Always allow" holds for the rest of the session. Commands are not among them: allowing one command
-// always is not allowing every command.
+// Kinds whose "Always allow" this daemon holds for the rest of the session, for the person who gave it. Commands are
+// not among them: allowing one command always is not allowing every command.
 const REMEMBERED_ALWAYS_KINDS: ReadonlySet<string> = new Set(['read', 'edit', 'search', 'fetch'])
 
 export class PermissionCoordinator {
@@ -368,8 +368,10 @@ export class PermissionCoordinator {
   /** Durable rows still being written. Admission publishes its resolver first, so anything that
    *  settles a request must wait for the row it settles to exist. */
   private readonly recordedWrites = new Map<string, Promise<unknown>>()
-  /** Per session, the tool kinds a chat approver answered "Always allow" for. A runtime may scope its own "always"
-   *  narrower than the person meant (OpenCode re-asks for every file), so the same kind is not asked again. */
+  /** Per session and approver, the tool kinds that approver answered "Always allow" for. A runtime scopes its own
+   *  "always" to the session, and a channel's session is everyone's: OpenCode, told "always" by one person, then let
+   *  anyone in the channel edit files unasked. So the runtime is told "once" and the "always" is kept here, for its
+   *  approver only, which also covers a runtime that re-asks for every file. */
   private readonly alwaysAllowedKinds = new Map<string, Set<string>>()
   private pendingEditorPermissions = new Map<string, EditorPermissionEntry | EditorElicitationEntry>()
 
@@ -1502,12 +1504,13 @@ export class PermissionCoordinator {
     facet: ElicitCardFacet,
     approver: string
   ): Promise<RequestPermissionResponse> {
-    const always = params.options.find((o) => o.kind === 'allow_always')
+    const once = params.options.find((o) => o.kind === 'allow_once')
     const kind = params.toolCall?.kind ?? ''
-    const sessionKey = pendingTurnKey(p.hostKey, sessionId)
-    if (always && REMEMBERED_ALWAYS_KINDS.has(kind) && this.alwaysAllowedKinds.get(sessionKey)?.has(kind)) {
+    const alwaysKey = `${pendingTurnKey(p.hostKey, sessionId)}\n${approver}`
+    const remembered = REMEMBERED_ALWAYS_KINDS.has(kind) && once !== undefined
+    if (remembered && this.alwaysAllowedKinds.get(alwaysKey)?.has(kind)) {
       this.permissionEvaluationDetails.set(evaluationParams, { reason: 'permission_always_allowed_in_chat' })
-      return { outcome: { outcome: 'selected', optionId: always.optionId } }
+      return { outcome: { outcome: 'selected', optionId: once.optionId } }
     }
     const ask = permissionElicitation(params)
     const form = elicitForm(ask, facet.reduction)
@@ -1523,10 +1526,11 @@ export class PermissionCoordinator {
       this.permissionEvaluationDetails.set(evaluationParams, { reason: 'permission_card_unanswered' })
       return { outcome: { outcome: 'cancelled' } }
     }
-    if (option.kind === 'allow_always' && REMEMBERED_ALWAYS_KINDS.has(kind)) {
+    if (option.kind === 'allow_always' && remembered) {
       if (this.alwaysAllowedKinds.size >= 1000)
         this.alwaysAllowedKinds.delete(this.alwaysAllowedKinds.keys().next().value!)
-      this.alwaysAllowedKinds.set(sessionKey, new Set([...(this.alwaysAllowedKinds.get(sessionKey) ?? []), kind]))
+      this.alwaysAllowedKinds.set(alwaysKey, new Set([...(this.alwaysAllowedKinds.get(alwaysKey) ?? []), kind]))
+      return { outcome: { outcome: 'selected', optionId: once.optionId } }
     }
     return { outcome: { outcome: 'selected', optionId: option.optionId } }
   }
