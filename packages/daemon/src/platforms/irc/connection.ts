@@ -171,6 +171,8 @@ export class IrcConnection implements PlatformConnection {
   private readonly awaitingEcho = new Map<string, EchoWaiter[]>()
   // irc-framework keeps a batch's lines but not the tags of its opening line, where a multiline message's msgid is.
   private readonly batchTags = new Map<string, Record<string, string>>()
+  /** Per target, the msgids an answer's question can be answered by replying to; the next such reply is for us. */
+  private readonly openQuestions = new Map<string, Set<string>>()
   /** IRCv3 typing per target: how many turns are working there, whether a card has them waiting, the refresh. */
   private readonly typing = new Map<
     string,
@@ -352,6 +354,7 @@ export class IrcConnection implements PlatformConnection {
     for (const waiters of this.awaitingEcho.values()) for (const settle of waiters) settle(null)
     this.awaitingEcho.clear()
     this.batchTags.clear()
+    this.openQuestions.clear()
     this.client.quit('disconnecting')
   }
 
@@ -416,7 +419,10 @@ export class IrcConnection implements PlatformConnection {
         kind,
         nick: event.nick,
         target: event.target,
-        text: event.message,
+        text:
+          this.answeringQuestion(kind, event.target, tags) && !this.addressesUs(event.message)
+            ? `${this.nick}: ${event.message}`
+            : event.message,
         tags,
         fallbackId: this.mintLocalId(),
         receivedAtMs: this.now()
@@ -430,6 +436,30 @@ export class IrcConnection implements PlatformConnection {
       }
     )
     if (msg) this.deps.onMessage?.(msg)
+  }
+
+  /** See {@link IrcReplyPort.expectAnswer}. A later question in the same target replaces the earlier one. */
+  expectAnswer(target: string, replyIds: string[]): void {
+    const key = ircCaseFold(target, this.casemapping)
+    this.openQuestions.delete(key)
+    this.openQuestions.set(key, new Set(replyIds))
+    if (this.openQuestions.size > 1000) this.openQuestions.delete(this.openQuestions.keys().next().value!)
+  }
+
+  private addressesUs(text: string): boolean {
+    const match = /^([^\s:,]+)[:,]/.exec(text)
+    return !!match && ircCaseFold(match[1]!, this.casemapping) === ircCaseFold(this.nick, this.casemapping)
+  }
+
+  // A reply to an open question answers it, so it is addressed to us; the question then closes.
+  private answeringQuestion(kind: IrcMessageEvent['kind'], target: string, tags: Record<string, string>): boolean {
+    const replyTo = tags['+draft/reply'] ?? tags['+reply']
+    const key = ircCaseFold(target, this.casemapping)
+    // A DM is always for us, so only a channel needs it.
+    if (kind !== 'privmsg' || !this.isChannel(target) || !replyTo || !this.openQuestions.get(key)?.has(replyTo))
+      return false
+    this.openQuestions.delete(key)
+    return true
   }
 
   /** A multiline message: our own is a send's echo, anyone else's one inbound message with the batch's tags. */

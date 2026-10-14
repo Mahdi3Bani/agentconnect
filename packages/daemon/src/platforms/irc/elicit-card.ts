@@ -24,7 +24,8 @@ import {
 } from '../../slack/render.js'
 import { IRC_MAX_ANSWER_LINES, ircThreadTags, type IrcReplyPort, type IrcTurnState } from './turn-output.js'
 
-export const IRC_CARD_TAG = '+mosircley.de/card'
+export { IRC_CARD_TAG } from './soft-question.js'
+import { IRC_CARD_TAG } from './soft-question.js'
 // The card tag's own limits: a client drops a card that breaks them, leaving only the text.
 const IRC_CARD_MAX_OPTIONS = 12
 const IRC_CARD_MAX_LABEL = 80

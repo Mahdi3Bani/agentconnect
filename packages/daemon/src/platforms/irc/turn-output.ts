@@ -8,6 +8,7 @@ import { isNoResponseBody } from '../../session/no-response.js'
 import type { TurnOutputContext } from '../turn-output.js'
 import type { IrcSendReceipt } from './connection.js'
 import { renderIrcText } from './render.js'
+import { ircSoftQuestion, ircSoftQuestionTag } from './soft-question.js'
 
 /** An answer longer than this is cut, with a notice: a channel is shared, and 1 line per 2s makes a long one a minute. */
 export const IRC_MAX_ANSWER_LINES = { channel: 12, dm: 40 }
@@ -40,6 +41,8 @@ export interface IrcReplyPort {
   typingPause?(target: string, paused: boolean): void
   /** Whether a post goes out as one multiline message; absent means line by line. */
   longForm?(): boolean
+  /** An answer in `target` ended on a question: the next reply to one of `replyIds` is for us, addressed or not. */
+  expectAnswer?(target: string, replyIds: string[]): void
 }
 
 // IRC cannot edit or delete, so nothing streams: one final post, and progress only as rationed completed messages.
@@ -192,7 +195,18 @@ export async function applyIrcAction(
     return
   }
   const caps = state.conn.longForm?.() ? IRC_MAX_LONG_FORM_LINES : IRC_MAX_ANSWER_LINES
-  await state.conn.sendText(state.target, text, { maxLines: state.isDm ? caps.dm : caps.channel, ...thread(state) })
+  // An answer that ends on a question with numbered options offers them as buttons, and takes the reply to it.
+  const options = ircSoftQuestion(action.text)
+  const tags = { ...ircThreadTags(state), ...(options ? ircSoftQuestionTag(options) : {}) }
+  const receipts = await state.conn.sendText(state.target, text, {
+    maxLines: state.isDm ? caps.dm : caps.channel,
+    ...(Object.keys(tags).length ? { tags } : {})
+  })
+  if (options) {
+    // A tap replies to the answer; a reply typed in the thread names the thread's root.
+    const ids = [receipts[0]?.id, state.replyTo].filter((id): id is string => !!id && !id.startsWith('local-'))
+    if (ids.length) state.conn.expectAnswer?.(state.target, ids)
+  }
 }
 
 function thread(state: IrcTurnState): { tags?: Record<string, string> } {
